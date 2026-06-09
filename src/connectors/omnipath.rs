@@ -1,7 +1,6 @@
 use crate::connectors::utils::download_resource;
 use crate::shared::utils::dataframe_from_csv_bytes;
 use anyhow::anyhow;
-use polars::export::arrow::array::ViewType;
 use polars::prelude::pivot::pivot;
 use polars::prelude::{ChunkCompareEq, DataFrame, PlSmallStr};
 use single_utilities::types::PathwayNetwork;
@@ -21,14 +20,14 @@ pub fn load_resource(name: &str, license: &str, tax_id: Option<&str>) -> anyhow:
     let path = OMNIPATH_BASE_URL.to_owned() + format!("{}&license={}", name, license).as_str();
 
     let results = Runtime::new().unwrap().block_on(download_resource(&path))?;
-    let res_bytes = results.to_bytes();
-    let df = dataframe_from_csv_bytes(res_bytes, b'\t', true, None)?;
+    // `results` is `bytes::Bytes`, which derefs to `&[u8]`.
+    let df = dataframe_from_csv_bytes(results.as_ref(), b'\t', true, None)?;
     let df = process_omnipath_dataframe(df, tax_id)?;
     Ok(df)
 }
 
 fn process_omnipath_dataframe(
-    mut df: DataFrame,
+    df: DataFrame,
     tax_id: Option<&str>,
 ) -> anyhow::Result<DataFrame> {
     let df = df.select(["genesymbol", "label", "value", "record_id"])?;
