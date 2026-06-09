@@ -1,6 +1,7 @@
 /target
 /Cargo.lock
 data/
+.venv/
 .idea/
 .DS_Store
 resources
