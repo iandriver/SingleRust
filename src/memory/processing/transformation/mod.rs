@@ -1,8 +1,9 @@
-use std::ops::DerefMut;
+use std::ops::{Deref, DerefMut};
 
 use crate::shared::{statistics::ComputeSum, Precision};
 use anndata_memory::IMArrayElement;
 use anyhow::bail;
+use ndarray::{ArrayD, Axis, Ix2};
 use single_algebra::Log1P;
 use single_algebra::Normalize;
 use single_utilities::traits::FloatOpsTS;
@@ -63,13 +64,13 @@ fn log1p(matrix: &IMArrayElement) -> anyhow::Result<()> {
             anndata::data::DynArray::U64(_) => {
                 bail!("Array - Normalization it not implemented for type <U64>!")
             }
-            anndata::data::DynArray::F32(_) => todo!("Need to implement here!"),
-            anndata::data::DynArray::F64(_) => todo!("Need to implement here!"),
+            anndata::data::DynArray::F32(arr) => log1p_dense_array(arr),
+            anndata::data::DynArray::F64(arr) => log1p_dense_array(arr),
             anndata::data::DynArray::Bool(_) => {
-                bail!("Array - Normalization it not implemented for type <bool>!")
+                bail!("Array - Normalization is not implemented for type <bool>!")
             }
             anndata::data::DynArray::String(_) => {
-                bail!("Array - Normalization it not implemented for type <bool>!")
+                bail!("Array - Normalization is not implemented for type <String>!")
             }
         },
         anndata::ArrayData::CsrMatrix(dyn_csr_matrix) => match dyn_csr_matrix {
@@ -107,7 +108,7 @@ fn log1p(matrix: &IMArrayElement) -> anyhow::Result<()> {
             }
         },
         anndata::ArrayData::CsrNonCanonical(_) => {
-            todo!("This is not implemented yet!")
+            bail!("CsrNonCanonical matrices are not supported; canonicalize the matrix first.")
         }
         anndata::ArrayData::CscMatrix(dyn_csc_matrix) => match dyn_csc_matrix {
             anndata::data::DynCscMatrix::I8(_) => {
@@ -143,7 +144,9 @@ fn log1p(matrix: &IMArrayElement) -> anyhow::Result<()> {
                 bail!("CscMatrix - Normalization it not implemented for type <string>!")
             }
         },
-        anndata::ArrayData::DataFrame(_) => todo!("This is not implemented yet!"),
+        anndata::ArrayData::DataFrame(_) => {
+            bail!("DataFrame-backed X is not supported for this operation.")
+        }
     }
 }
 
@@ -155,13 +158,25 @@ fn normalize_with_type<T>(
 where
     T: FloatOpsTS,
 {
-    let sums: Vec<T> = matrix.sum_whole(direction)?;
+    let target = T::from(expression_target).unwrap();
+
+    // Sparse matrices need their row/column sums pre-computed before we take the
+    // write guard, because `sum_whole` read-locks the same matrix (locking it while
+    // holding the write guard would deadlock). Dense arrays instead compute their
+    // sums directly from the array under the write guard.
+    let is_dense = {
+        let read_guard = matrix.0.read_inner();
+        matches!(read_guard.deref(), anndata::ArrayData::Array(_))
+    };
+    let sums: Vec<T> = if is_dense {
+        Vec::new()
+    } else {
+        matrix.sum_whole(direction)?
+    };
 
     let mut write_guard = matrix.0.write_inner();
 
     let data = write_guard.deref_mut();
-
-    let target = T::from(expression_target).unwrap();
 
     match data {
         anndata::ArrayData::Array(dyn_array) => match dyn_array {
@@ -189,13 +204,17 @@ where
             anndata::data::DynArray::U64(_) => {
                 bail!("Array - Normalization it not implemented for type <U64>!")
             }
-            anndata::data::DynArray::F32(_) => todo!("Need to implement here!"),
-            anndata::data::DynArray::F64(_) => todo!("Need to implement here!"),
+            anndata::data::DynArray::F32(arr) => {
+                normalize_dense_array::<f32, T>(arr, target, direction)
+            }
+            anndata::data::DynArray::F64(arr) => {
+                normalize_dense_array::<f64, T>(arr, target, direction)
+            }
             anndata::data::DynArray::Bool(_) => {
-                bail!("Array - Normalization it not implemented for type <bool>!")
+                bail!("Array - Normalization is not implemented for type <bool>!")
             }
             anndata::data::DynArray::String(_) => {
-                bail!("Array - Normalization it not implemented for type <bool>!")
+                bail!("Array - Normalization is not implemented for type <String>!")
             }
         },
         anndata::ArrayData::CsrMatrix(dyn_csr_matrix) => match dyn_csr_matrix {
@@ -237,7 +256,7 @@ where
             }
         },
         anndata::ArrayData::CsrNonCanonical(_) => {
-            todo!("This is not implemented yet!")
+            bail!("CsrNonCanonical matrices are not supported; canonicalize the matrix first.")
         }
         anndata::ArrayData::CscMatrix(dyn_csc_matrix) => match dyn_csc_matrix {
             anndata::data::DynCscMatrix::I8(_) => {
@@ -277,6 +296,122 @@ where
                 bail!("CscMatrix - Normalization it not implemented for type <string>!")
             }
         },
-        anndata::ArrayData::DataFrame(_) => todo!("This is not implemented yet!"),
+        anndata::ArrayData::DataFrame(_) => {
+            bail!("DataFrame-backed X is not supported for this operation.")
+        }
+    }
+}
+
+/// Apply `log1p` (natural `ln(1 + x)`) elementwise to a dense array, in place.
+///
+/// Mirrors the sparse [`Log1P`] implementation so results are identical regardless of
+/// whether `X` is stored densely or as a CSR/CSC matrix. Zeros map to `ln(1) = 0`.
+fn log1p_dense_array<S>(arr: &mut ArrayD<S>) -> anyhow::Result<()>
+where
+    S: FloatOpsTS,
+{
+    arr.mapv_inplace(|v| (S::one() + v).ln());
+    Ok(())
+}
+
+/// Scale a dense 2D array in place so each row (or column) totals `target`.
+///
+/// Per-line sums are computed directly from the array in the compute type `U` (the
+/// dense analogue of `sum_whole`), while values are stored in type `S`. For
+/// `Direction::ROW` each row is scaled to `target`; for `Direction::COLUMN` each column
+/// is. Lines whose sum is non-positive are left untouched, mirroring the sparse
+/// [`Normalize`] implementation (`scale = target / sum`).
+fn normalize_dense_array<S, U>(
+    arr: &mut ArrayD<S>,
+    target: U,
+    direction: &Direction,
+) -> anyhow::Result<()>
+where
+    S: FloatOpsTS,
+    U: FloatOpsTS,
+{
+    let mut view = arr
+        .view_mut()
+        .into_dimensionality::<Ix2>()
+        .map_err(|e| anyhow::anyhow!("Expected a 2D expression matrix: {e}"))?;
+
+    let to_u = |val: S| -> anyhow::Result<U> {
+        U::from(val).ok_or_else(|| anyhow::anyhow!("Failed to convert value for scaling"))
+    };
+
+    // Scale a single line (row or column) to `target`, skipping non-positive sums.
+    let scale_line = |line: &mut ndarray::ArrayViewMut1<S>| -> anyhow::Result<()> {
+        let mut sum = U::zero();
+        for &val in line.iter() {
+            sum += to_u(val)?;
+        }
+        if sum > U::zero() {
+            let scale = target / sum;
+            for val in line.iter_mut() {
+                *val = S::from(to_u(*val)? * scale)
+                    .ok_or_else(|| anyhow::anyhow!("Failed to convert scaled value"))?;
+            }
+        }
+        Ok(())
+    };
+
+    match direction {
+        Direction::ROW => {
+            for mut row in view.outer_iter_mut() {
+                scale_line(&mut row)?;
+            }
+        }
+        Direction::COLUMN => {
+            for mut col in view.axis_iter_mut(Axis(1)) {
+                scale_line(&mut col)?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use anndata::data::DynArray;
+    use anndata::ArrayData;
+    use anndata_memory::IMArrayElement;
+    use ndarray::Array2;
+
+    fn dense_element(values: Array2<f64>) -> IMArrayElement {
+        let arr: ArrayData = DynArray::from(values).into();
+        IMArrayElement::new(arr)
+    }
+
+    fn to_dense_f64(elem: &IMArrayElement) -> Array2<f64> {
+        crate::shared::convert_to_array_f64(&elem.get_data().unwrap()).unwrap()
+    }
+
+    /// log1p on a dense F64 matrix must apply ln(1+x) and no longer panic.
+    #[test]
+    fn log1p_dense_matches_formula() -> anyhow::Result<()> {
+        let elem = dense_element(Array2::from_shape_vec((2, 2), vec![0.0, 1.0, 3.0, 7.0])?);
+        log1p_expression(&elem, Some(Precision::Double))?;
+        let out = to_dense_f64(&elem);
+        let expected = [0.0_f64, 2.0_f64.ln(), 4.0_f64.ln(), 8.0_f64.ln()];
+        for (got, exp) in out.iter().zip(expected.iter()) {
+            assert!((got - exp).abs() < 1e-9, "got {got}, expected {exp}");
+        }
+        Ok(())
+    }
+
+    /// Row normalization scales each row to the target total; zero rows stay zero.
+    #[test]
+    fn normalize_dense_rows_sum_to_target() -> anyhow::Result<()> {
+        let elem = dense_element(Array2::from_shape_vec((2, 2), vec![1.0, 3.0, 0.0, 0.0])?);
+        normalize_expression(&elem, 10, &Direction::ROW, Some(Precision::Double))?;
+        let out = to_dense_f64(&elem);
+        // Row 0 summed to 4 -> scaled by 10/4: [2.5, 7.5]; row 1 is all-zero -> untouched.
+        assert!((out[[0, 0]] - 2.5).abs() < 1e-9);
+        assert!((out[[0, 1]] - 7.5).abs() < 1e-9);
+        assert_eq!(out[[1, 0]], 0.0);
+        assert_eq!(out[[1, 1]], 0.0);
+        Ok(())
     }
 }
