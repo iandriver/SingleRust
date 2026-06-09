@@ -16,7 +16,7 @@ pub mod filtering;
 mod hvg;
 mod transformation;
 
-mod enrichment;
+pub mod enrichment;
 
 pub use hvg::compute_highly_variable_genes;
 pub use transformation::log1p_expression;

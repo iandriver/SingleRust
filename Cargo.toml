@@ -11,7 +11,7 @@ homepage = "https://singlerust.com"
 
 [features]
 simba = ["single_algebra/simba", "dep:simba"]
-enrichment = ["single-statistics/enrichment"]
+enrichment = ["single-statistics/enrichment", "dep:statrs"]
 db-io = ["dep:reqwest", "dep:tokio", "dep:bytes"]
 
 [dependencies]
@@ -39,6 +39,7 @@ single-statistics = { version = "0.8.5" }
 reqwest = { version = "0.12.24", features = ["stream", "blocking"], optional = true }
 tokio = { version = "1", features = ["full"], optional = true }
 bytes = { version = "1.10.1", optional = true }
+statrs = { version = "0.18.0", optional = true }
 
 
 
