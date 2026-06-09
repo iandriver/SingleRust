@@ -315,14 +315,15 @@ impl ComputeTopSegmentProportions for IMArrayElement {
         }
 
         for &n in &unique_ns {
+            // `n_top_whole` already returns the sum of the top-`n` values per item
+            // (length `n_items`), so index it per item rather than re-slicing it as if
+            // it held `n_items * n` raw values.
             let top_values: Vec<f64> = self.n_top_whole(direction, n)?;
 
             for item_idx in 0..n_items {
                 let total = totals[item_idx];
                 if total > 0.0 {
-                    let start_idx = item_idx * n;
-                    let end_idx = start_idx + n;
-                    let sum_top_n: f64 = top_values[start_idx..end_idx].iter().sum();
+                    let sum_top_n = top_values[item_idx];
                     let proportion = sum_top_n / total;
 
                     for &ns_idx in &n_to_indices[&n] {
@@ -374,3 +375,38 @@ where
     Ok(())
 }
 */
+
+#[cfg(test)]
+mod tests {
+    use crate::shared::statistics::ComputeTopSegmentProportions;
+    use anndata::data::DynCsrMatrix;
+    use anndata::ArrayData;
+    use anndata_memory::IMArrayElement;
+    use nalgebra_sparse::{CooMatrix, CsrMatrix};
+    use single_utilities::types::Direction;
+
+    /// Regression test: `top_segment_proportions` must return, per cell, the fraction of
+    /// counts captured by that cell's top-`n` genes. Previously it mis-indexed the
+    /// per-cell top-n sums and panicked / produced garbage on real data.
+    #[test]
+    fn top_segment_proportions_per_cell_fraction() {
+        // 2 cells × 4 genes.
+        //   cell 0: [1, 2, 3, 4] -> total 10, top-2 = 3+4 = 7  -> 0.7
+        //   cell 1: [0, 0, 5, 5] -> total 10, top-2 = 5+5 = 10 -> 1.0
+        let mut coo = CooMatrix::<f64>::new(2, 4);
+        for (j, v) in [1.0, 2.0, 3.0, 4.0].iter().enumerate() {
+            coo.push(0, j, *v);
+        }
+        coo.push(1, 2, 5.0);
+        coo.push(1, 3, 5.0);
+        let csr = CsrMatrix::from(&coo);
+        let elem = IMArrayElement::new(ArrayData::CsrMatrix(DynCsrMatrix::F64(csr)));
+
+        let props = elem
+            .top_segment_proportions(&Direction::ROW, &[2])
+            .unwrap();
+        assert_eq!(props.dim(), (2, 1));
+        assert!((props[[0, 0]] - 0.7).abs() < 1e-9, "cell0: {}", props[[0, 0]]);
+        assert!((props[[1, 0]] - 1.0).abs() < 1e-9, "cell1: {}", props[[1, 0]]);
+    }
+}
