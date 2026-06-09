@@ -9,6 +9,47 @@ use single_algebra::Normalize;
 use single_utilities::traits::FloatOpsTS;
 use single_utilities::types::Direction;
 
+/// Dispatch an in-place operation over the supported float storage formats of an
+/// [`anndata::ArrayData`].
+///
+/// The three operation arms receive, respectively, the dense `ArrayD`, the CSR matrix,
+/// and the CSC matrix payload (each as `f32` or `f64`). Every unsupported container or
+/// dtype bails with a uniform message. This collapses the otherwise-identical 12-variant
+/// match arms that `log1p` and `normalize_with_type` would each need for all three
+/// containers.
+macro_rules! dispatch_float_matrix {
+    (
+        $data:expr,
+        |$arr:ident| $array_op:expr,
+        |$csr:ident| $csr_op:expr,
+        |$csc:ident| $csc_op:expr $(,)?
+    ) => {{
+        match $data {
+            anndata::ArrayData::Array(dyn_array) => match dyn_array {
+                anndata::data::DynArray::F32($arr) => $array_op,
+                anndata::data::DynArray::F64($arr) => $array_op,
+                _ => bail!("dense array: only f32/f64 are supported for this operation"),
+            },
+            anndata::ArrayData::CsrMatrix(dyn_csr) => match dyn_csr {
+                anndata::data::DynCsrMatrix::F32($csr) => $csr_op,
+                anndata::data::DynCsrMatrix::F64($csr) => $csr_op,
+                _ => bail!("CSR matrix: only f32/f64 are supported for this operation"),
+            },
+            anndata::ArrayData::CscMatrix(dyn_csc) => match dyn_csc {
+                anndata::data::DynCscMatrix::F32($csc) => $csc_op,
+                anndata::data::DynCscMatrix::F64($csc) => $csc_op,
+                _ => bail!("CSC matrix: only f32/f64 are supported for this operation"),
+            },
+            anndata::ArrayData::CsrNonCanonical(_) => {
+                bail!("CsrNonCanonical matrices are not supported; canonicalize the matrix first.")
+            }
+            anndata::ArrayData::DataFrame(_) => {
+                bail!("DataFrame-backed X is not supported for this operation.")
+            }
+        }
+    }};
+}
+
 pub fn normalize_expression(
     matrix: &IMArrayElement,
     expression_target: u32,
@@ -38,116 +79,12 @@ pub fn log1p_expression(
 fn log1p(matrix: &IMArrayElement) -> anyhow::Result<()> {
     let mut write_guard = matrix.0.write_inner();
     let data = write_guard.deref_mut();
-    match data {
-        anndata::ArrayData::Array(dyn_array) => match dyn_array {
-            anndata::data::DynArray::I8(_) => {
-                bail!("Array - Normalization it not implemented for type <I8>!")
-            }
-            anndata::data::DynArray::I16(_) => {
-                bail!("Array - Normalization it not implemented for type <I16>!")
-            }
-            anndata::data::DynArray::I32(_) => {
-                bail!("Array - Normalization it not implemented for type <I32>!")
-            }
-            anndata::data::DynArray::I64(_) => {
-                bail!("Array - Normalization it not implemented for type <I64>!")
-            }
-            anndata::data::DynArray::U8(_) => {
-                bail!("Array - Normalization it not implemented for type <U8>!")
-            }
-            anndata::data::DynArray::U16(_) => {
-                bail!("Array - Normalization it not implemented for type <U16>!")
-            }
-            anndata::data::DynArray::U32(_) => {
-                bail!("Array - Normalization it not implemented for type <U32>!")
-            }
-            anndata::data::DynArray::U64(_) => {
-                bail!("Array - Normalization it not implemented for type <U64>!")
-            }
-            anndata::data::DynArray::F32(arr) => log1p_dense_array(arr),
-            anndata::data::DynArray::F64(arr) => log1p_dense_array(arr),
-            anndata::data::DynArray::Bool(_) => {
-                bail!("Array - Normalization is not implemented for type <bool>!")
-            }
-            anndata::data::DynArray::String(_) => {
-                bail!("Array - Normalization is not implemented for type <String>!")
-            }
-        },
-        anndata::ArrayData::CsrMatrix(dyn_csr_matrix) => match dyn_csr_matrix {
-            anndata::data::DynCsrMatrix::I8(_) => {
-                bail!("CsrMatrix - Normalization it not implemented for type <I8>!")
-            }
-            anndata::data::DynCsrMatrix::I16(_) => {
-                bail!("CsrMatrix - Normalization it not implemented for type <I16>!")
-            }
-            anndata::data::DynCsrMatrix::I32(_) => {
-                bail!("CsrMatrix - Normalization it not implemented for type <I32>!")
-            }
-            anndata::data::DynCsrMatrix::I64(_) => {
-                bail!("CsrMatrix - Normalization it not implemented for type <I64>!")
-            }
-            anndata::data::DynCsrMatrix::U8(_) => {
-                bail!("CsrMatrix - Normalization it not implemented for type <U8>!")
-            }
-            anndata::data::DynCsrMatrix::U16(_) => {
-                bail!("CsrMatrix - Normalization it not implemented for type <U16>!")
-            }
-            anndata::data::DynCsrMatrix::U32(_) => {
-                bail!("CsrMatrix - Normalization it not implemented for type <U32>!")
-            }
-            anndata::data::DynCsrMatrix::U64(_) => {
-                bail!("CsrMatrix - Normalization it not implemented for type <U64>!")
-            }
-            anndata::data::DynCsrMatrix::F32(csr_matrix) => csr_matrix.log1p_normalize(),
-            anndata::data::DynCsrMatrix::F64(csr_matrix) => csr_matrix.log1p_normalize(),
-            anndata::data::DynCsrMatrix::Bool(_) => {
-                bail!("CsrMatrix - Normalization it not implemented for type <bool>!")
-            }
-            anndata::data::DynCsrMatrix::String(_) => {
-                bail!("CsrMatrix - Normalization it not implemented for type <string>!")
-            }
-        },
-        anndata::ArrayData::CsrNonCanonical(_) => {
-            bail!("CsrNonCanonical matrices are not supported; canonicalize the matrix first.")
-        }
-        anndata::ArrayData::CscMatrix(dyn_csc_matrix) => match dyn_csc_matrix {
-            anndata::data::DynCscMatrix::I8(_) => {
-                bail!("CscMatrix - Normalization it not implemented for type <I8>!")
-            }
-            anndata::data::DynCscMatrix::I16(_) => {
-                bail!("CscMatrix - Normalization it not implemented for type <I16>!")
-            }
-            anndata::data::DynCscMatrix::I32(_) => {
-                bail!("CscMatrix - Normalization it not implemented for type <I32>!")
-            }
-            anndata::data::DynCscMatrix::I64(_) => {
-                bail!("CscMatrix - Normalization it not implemented for type <I64>!")
-            }
-            anndata::data::DynCscMatrix::U8(_) => {
-                bail!("CscMatrix - Normalization it not implemented for type <U8>!")
-            }
-            anndata::data::DynCscMatrix::U16(_) => {
-                bail!("CscMatrix - Normalization it not implemented for type <U16>!")
-            }
-            anndata::data::DynCscMatrix::U32(_) => {
-                bail!("CscMatrix - Normalization it not implemented for type <U32>!")
-            }
-            anndata::data::DynCscMatrix::U64(_) => {
-                bail!("CscMatrix - Normalization it not implemented for type <U64>!")
-            }
-            anndata::data::DynCscMatrix::F32(csc_matrix) => csc_matrix.log1p_normalize(),
-            anndata::data::DynCscMatrix::F64(csc_matrix) => csc_matrix.log1p_normalize(),
-            anndata::data::DynCscMatrix::Bool(_) => {
-                bail!("CscMatrix - Normalization it not implemented for type <bool>!")
-            }
-            anndata::data::DynCscMatrix::String(_) => {
-                bail!("CscMatrix - Normalization it not implemented for type <string>!")
-            }
-        },
-        anndata::ArrayData::DataFrame(_) => {
-            bail!("DataFrame-backed X is not supported for this operation.")
-        }
-    }
+    dispatch_float_matrix!(
+        data,
+        |arr| log1p_dense_array(arr),
+        |csr| csr.log1p_normalize(),
+        |csc| csc.log1p_normalize(),
+    )
 }
 
 fn normalize_with_type<T>(
@@ -178,128 +115,12 @@ where
 
     let data = write_guard.deref_mut();
 
-    match data {
-        anndata::ArrayData::Array(dyn_array) => match dyn_array {
-            anndata::data::DynArray::I8(_) => {
-                bail!("Array - Normalization it not implemented for type <I8>!")
-            }
-            anndata::data::DynArray::I16(_) => {
-                bail!("Array - Normalization it not implemented for type <I16>!")
-            }
-            anndata::data::DynArray::I32(_) => {
-                bail!("Array - Normalization it not implemented for type <I32>!")
-            }
-            anndata::data::DynArray::I64(_) => {
-                bail!("Array - Normalization it not implemented for type <I64>!")
-            }
-            anndata::data::DynArray::U8(_) => {
-                bail!("Array - Normalization it not implemented for type <U8>!")
-            }
-            anndata::data::DynArray::U16(_) => {
-                bail!("Array - Normalization it not implemented for type <U16>!")
-            }
-            anndata::data::DynArray::U32(_) => {
-                bail!("Array - Normalization it not implemented for type <U32>!")
-            }
-            anndata::data::DynArray::U64(_) => {
-                bail!("Array - Normalization it not implemented for type <U64>!")
-            }
-            anndata::data::DynArray::F32(arr) => {
-                normalize_dense_array::<f32, T>(arr, target, direction)
-            }
-            anndata::data::DynArray::F64(arr) => {
-                normalize_dense_array::<f64, T>(arr, target, direction)
-            }
-            anndata::data::DynArray::Bool(_) => {
-                bail!("Array - Normalization is not implemented for type <bool>!")
-            }
-            anndata::data::DynArray::String(_) => {
-                bail!("Array - Normalization is not implemented for type <String>!")
-            }
-        },
-        anndata::ArrayData::CsrMatrix(dyn_csr_matrix) => match dyn_csr_matrix {
-            anndata::data::DynCsrMatrix::I8(_) => {
-                bail!("CsrMatrix - Normalization it not implemented for type <I8>!")
-            }
-            anndata::data::DynCsrMatrix::I16(_) => {
-                bail!("CsrMatrix - Normalization it not implemented for type <I16>!")
-            }
-            anndata::data::DynCsrMatrix::I32(_) => {
-                bail!("CsrMatrix - Normalization it not implemented for type <I32>!")
-            }
-            anndata::data::DynCsrMatrix::I64(_) => {
-                bail!("CsrMatrix - Normalization it not implemented for type <I64>!")
-            }
-            anndata::data::DynCsrMatrix::U8(_) => {
-                bail!("CsrMatrix - Normalization it not implemented for type <U8>!")
-            }
-            anndata::data::DynCsrMatrix::U16(_) => {
-                bail!("CsrMatrix - Normalization it not implemented for type <U16>!")
-            }
-            anndata::data::DynCsrMatrix::U32(_) => {
-                bail!("CsrMatrix - Normalization it not implemented for type <U32>!")
-            }
-            anndata::data::DynCsrMatrix::U64(_) => {
-                bail!("CsrMatrix - Normalization it not implemented for type <U64>!")
-            }
-            anndata::data::DynCsrMatrix::F32(csr_matrix) => {
-                csr_matrix.normalize::<T>(sums.as_slice(), target, direction)
-            }
-            anndata::data::DynCsrMatrix::F64(csr_matrix) => {
-                csr_matrix.normalize::<T>(sums.as_slice(), target, direction)
-            }
-            anndata::data::DynCsrMatrix::Bool(_) => {
-                bail!("CsrMatrix - Normalization it not implemented for type <bool>!")
-            }
-            anndata::data::DynCsrMatrix::String(_) => {
-                bail!("CsrMatrix - Normalization it not implemented for type <string>!")
-            }
-        },
-        anndata::ArrayData::CsrNonCanonical(_) => {
-            bail!("CsrNonCanonical matrices are not supported; canonicalize the matrix first.")
-        }
-        anndata::ArrayData::CscMatrix(dyn_csc_matrix) => match dyn_csc_matrix {
-            anndata::data::DynCscMatrix::I8(_) => {
-                bail!("CscMatrix - Normalization it not implemented for type <I8>!")
-            }
-            anndata::data::DynCscMatrix::I16(_) => {
-                bail!("CscMatrix - Normalization it not implemented for type <I16>!")
-            }
-            anndata::data::DynCscMatrix::I32(_) => {
-                bail!("CscMatrix - Normalization it not implemented for type <I32>!")
-            }
-            anndata::data::DynCscMatrix::I64(_) => {
-                bail!("CscMatrix - Normalization it not implemented for type <I64>!")
-            }
-            anndata::data::DynCscMatrix::U8(_) => {
-                bail!("CscMatrix - Normalization it not implemented for type <U8>!")
-            }
-            anndata::data::DynCscMatrix::U16(_) => {
-                bail!("CscMatrix - Normalization it not implemented for type <U16>!")
-            }
-            anndata::data::DynCscMatrix::U32(_) => {
-                bail!("CscMatrix - Normalization it not implemented for type <U32>!")
-            }
-            anndata::data::DynCscMatrix::U64(_) => {
-                bail!("CscMatrix - Normalization it not implemented for type <U64>!")
-            }
-            anndata::data::DynCscMatrix::F32(csc_matrix) => {
-                csc_matrix.normalize::<T>(sums.as_slice(), target, direction)
-            }
-            anndata::data::DynCscMatrix::F64(csc_matrix) => {
-                csc_matrix.normalize::<T>(sums.as_slice(), target, direction)
-            }
-            anndata::data::DynCscMatrix::Bool(_) => {
-                bail!("CscMatrix - Normalization it not implemented for type <bool>!")
-            }
-            anndata::data::DynCscMatrix::String(_) => {
-                bail!("CscMatrix - Normalization it not implemented for type <string>!")
-            }
-        },
-        anndata::ArrayData::DataFrame(_) => {
-            bail!("DataFrame-backed X is not supported for this operation.")
-        }
-    }
+    dispatch_float_matrix!(
+        data,
+        |arr| normalize_dense_array(arr, target, direction),
+        |csr| csr.normalize::<T>(sums.as_slice(), target, direction),
+        |csc| csc.normalize::<T>(sums.as_slice(), target, direction),
+    )
 }
 
 /// Apply `log1p` (natural `ln(1 + x)`) elementwise to a dense array, in place.
