@@ -64,9 +64,9 @@
 
 use crate::memory::processing::dimred::FeatureSelectionMethod;
 use crate::memory::utils::{arr1_conversion, arr2_conversion};
-use anndata::data::DynCsrMatrix;
-use anndata::ArrayData;
-use anndata_memory::IMArrayElement;
+use anndata::data::{DynArray, DynCsrMatrix};
+use anndata::{ArrayData, Data};
+use anndata_memory::{IMAnnData, IMArrayElement, IMElement};
 use anyhow::anyhow;
 use ndarray::{Array1, Array2};
 use rand::distr::Uniform;
@@ -295,6 +295,121 @@ where
     }
 }
 
+/// Run PCA and store the results in the AnnData object following scanpy conventions.
+///
+/// This is a convenience wrapper around [`run_pca_sparse_masked`] that, in addition to
+/// returning the [`PCAResult`], writes the outputs back into `adata` using the same
+/// slots scanpy/anndata expect. This makes the embedding directly consumable by
+/// downstream steps (t-SNE, UMAP, clustering) and by scanpy itself once the object is
+/// written to `.h5ad` via [`crate::io::write_h5ad`].
+///
+/// ## Stored outputs
+///
+/// * `adata.obsm["X_{key_added}"]` — cell embeddings (`n_obs × n_components`), as `f64`.
+///   With the default `key_added = "pca"` this is `obsm["X_pca"]`, exactly the key
+///   scanpy's neighbors/UMAP/t-SNE read from.
+/// * `adata.uns["{key_added}_variance_ratio"]` — fraction of variance explained by each
+///   component (for elbow/scree plots).
+/// * `adata.uns["{key_added}_variance_ratio_cumulative"]` — cumulative variance explained.
+///
+/// ## Loadings (`varm["PCs"]`)
+///
+/// scanpy also stores signed principal axes in `varm["PCs"]`. The masked sparse PCA
+/// backend currently only exposes *squared* feature importances over the **selected**
+/// gene subset (not the signed loadings over all genes), so a faithful, scanpy-semantic
+/// `varm["PCs"]` cannot be produced here yet. It is therefore intentionally omitted
+/// rather than written with mismatched semantics. The squared importances remain
+/// available on the returned [`PCAResult::feature_importance`].
+///
+/// ## Parameters
+///
+/// Identical to [`run_pca_sparse_masked`], plus:
+/// * `key_added` - Base key for the stored results (default: `"pca"`).
+///
+/// ## Returns
+///
+/// The [`PCAResult`], so callers can still access loadings/variance directly. The
+/// embedding and variance ratios are additionally persisted into `adata`.
+///
+/// ## Example
+///
+/// ```rust,ignore
+/// use single_rust::memory::processing::dimred::pca::run_pca_inplace;
+///
+/// // Compute PCA and populate obsm["X_pca"] + uns variance ratios in one call.
+/// run_pca_inplace::<f64>(&adata, Some(feature_selection), Some(true), None,
+///                        Some(50), None, Some(42), None, None)?;
+///
+/// let x_pca = adata.obsm().get_array("X_pca")?; // ready for UMAP/clustering
+/// ```
+#[allow(clippy::too_many_arguments)]
+pub fn run_pca_inplace<T>(
+    adata: &IMAnnData,
+    feature_selection_method: Option<FeatureSelectionMethod>,
+    center: Option<bool>,
+    verbose: Option<bool>,
+    n_components: Option<usize>,
+    alpha: Option<f64>,
+    random_seed: Option<u32>,
+    svd_method: Option<SVDMethod>,
+    key_added: Option<&str>,
+) -> anyhow::Result<PCAResult<T>>
+where
+    T: FloatOpsTS,
+{
+    let key = key_added.unwrap_or("pca");
+    let result = run_pca_sparse_masked::<T>(
+        &adata.x(),
+        feature_selection_method,
+        center,
+        verbose,
+        n_components,
+        alpha,
+        random_seed,
+        svd_method,
+    )?;
+    store_pca_result(adata, &result, key)?;
+    Ok(result)
+}
+
+/// Persist PCA embeddings and variance ratios into `adata` (scanpy slot conventions).
+///
+/// Embeddings are stored as `f64` in `obsm["X_{key}"]`; the variance-ratio vectors are
+/// stored as `f64` arrays in `uns`.
+fn store_pca_result<T>(
+    adata: &IMAnnData,
+    result: &PCAResult<T>,
+    key: &str,
+) -> anyhow::Result<()>
+where
+    T: FloatOpsTS,
+{
+    // Cell embeddings -> obsm["X_{key}"] (e.g. "X_pca").
+    let embeddings: Array2<f64> = arr2_conversion(result.transformed.clone())?;
+    let embeddings: ArrayData = DynArray::from(embeddings).into();
+    adata
+        .obsm()
+        .add_array(format!("X_{}", key), IMArrayElement::new(embeddings))?;
+
+    // Variance ratios -> uns (scanpy uses these for scree/elbow plots).
+    let variance_ratio: Array1<f64> = arr1_conversion(result.explained_variance_ratio.clone())?;
+    adata.uns().add_data(
+        format!("{}_variance_ratio", key),
+        IMElement::new(Data::ArrayData(DynArray::from(variance_ratio).into())),
+    )?;
+
+    let variance_ratio_cumulative: Array1<f64> =
+        arr1_conversion(result.cumulative_explained_variance_ratio.clone())?;
+    adata.uns().add_data(
+        format!("{}_variance_ratio_cumulative", key),
+        IMElement::new(Data::ArrayData(
+            DynArray::from(variance_ratio_cumulative).into(),
+        )),
+    )?;
+
+    Ok(())
+}
+
 /// Generate a random boolean mask for gene selection.
 ///
 /// Creates a boolean vector where `num_random_selection` randomly chosen positions
@@ -334,4 +449,89 @@ fn generate_random_mask(n_genes: usize, num_random_selection: usize) -> Vec<bool
         vec[v] = true;
     }
     vec
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use anndata_memory::IMAnnData;
+    use nalgebra_sparse::{CooMatrix, CsrMatrix};
+
+    /// Build a tiny CSR-backed AnnData fixture for PCA.
+    fn fixture(n_obs: usize, n_vars: usize) -> anyhow::Result<IMAnnData> {
+        // Deterministic dense-ish pattern, stored sparsely.
+        let mut coo = CooMatrix::<f64>::new(n_obs, n_vars);
+        for i in 0..n_obs {
+            for j in 0..n_vars {
+                let v = ((i * 7 + j * 3) % 5) as f64;
+                if v != 0.0 {
+                    coo.push(i, j, v);
+                }
+            }
+        }
+        let csr = CsrMatrix::from(&coo);
+        let matrix: ArrayData = DynCsrMatrix::from(csr).into();
+        let obs_names = (0..n_obs).map(|i| format!("cell{i}")).collect();
+        let var_names = (0..n_vars).map(|j| format!("gene{j}")).collect();
+        IMAnnData::new_basic(matrix, obs_names, var_names)
+    }
+
+    /// `run_pca_inplace` must populate `obsm["X_pca"]` with an (n_obs × n_components)
+    /// embedding and record the variance ratios in `uns` — the scanpy slots that make
+    /// the result consumable downstream.
+    #[test]
+    fn run_pca_inplace_populates_scanpy_slots() -> anyhow::Result<()> {
+        let (n_obs, n_vars, n_components) = (8, 6, 3);
+        let adata = fixture(n_obs, n_vars)?;
+
+        run_pca_inplace::<f64>(
+            &adata,
+            Some(FeatureSelectionMethod::FullFeatures),
+            Some(true),
+            Some(false),
+            Some(n_components),
+            None,
+            Some(42),
+            None,
+            None,
+        )?;
+
+        // obsm["X_pca"] exists with the expected shape.
+        assert!(adata.obsm().keys().contains(&"X_pca".to_string()));
+        let emb = adata.obsm().get_array("X_pca")?;
+        let shape = emb.get_shape()?;
+        assert_eq!(shape[0], n_obs);
+        assert_eq!(shape[1], n_components);
+
+        // Variance ratios recorded in uns.
+        let uns_keys = adata.uns().keys()?;
+        assert!(uns_keys.contains(&"pca_variance_ratio".to_string()));
+        assert!(uns_keys.contains(&"pca_variance_ratio_cumulative".to_string()));
+
+        Ok(())
+    }
+
+    /// A custom `key_added` should redirect the obsm/uns keys.
+    #[test]
+    fn run_pca_inplace_respects_key_added() -> anyhow::Result<()> {
+        let adata = fixture(6, 5)?;
+        run_pca_inplace::<f64>(
+            &adata,
+            Some(FeatureSelectionMethod::FullFeatures),
+            Some(true),
+            Some(false),
+            Some(2),
+            None,
+            Some(7),
+            None,
+            Some("mypca"),
+        )?;
+
+        assert!(adata.obsm().keys().contains(&"X_mypca".to_string()));
+        assert!(adata
+            .uns()
+            .keys()?
+            .contains(&"mypca_variance_ratio".to_string()));
+        Ok(())
+    }
 }
