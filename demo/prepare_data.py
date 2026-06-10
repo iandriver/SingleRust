@@ -1,18 +1,19 @@
-"""Fetch a small, stratified blood (PBMC-like) slice from the CZI CELLxGENE Census
-and save it as a counts `.h5ad` that SingleRust can consume.
+"""Fetch a stratified blood (PBMC-like) slice from the CZI CELLxGENE Census and save it as
+a counts `.h5ad` that SingleRust can consume.
 
-Output: data/input.h5ad  (raw counts, CSR float32, var_names = gene symbols)
+  python demo/prepare_data.py [--n-cells N] [--per-type K] [--out PATH]
+
+Output: raw counts, CSR float32, var_names = gene symbols.
 """
 import os
+import argparse
 import numpy as np
 import scanpy as sc
 import cellxgene_census
 from scipy.sparse import csr_matrix
 
-OUT = os.path.join(os.path.dirname(__file__), "..", "data", "input.h5ad")
+DEFAULT_OUT = os.path.join(os.path.dirname(__file__), "..", "data", "input.h5ad")
 CENSUS_VERSION = "2023-12-15"  # pinned for reproducibility
-PER_TYPE = 250                 # cells sampled per cell type
-TOTAL_CAP = 3000
 SEED = 0
 
 # Filter: healthy primary blood, a single common assay for homogeneity.
@@ -23,6 +24,16 @@ OBS_FILTER = (
 
 
 def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--n-cells", type=int, default=3000, help="total cell cap")
+    ap.add_argument("--per-type", type=int, default=250, help="cells sampled per cell type")
+    ap.add_argument("--out", default=DEFAULT_OUT, help="output .h5ad path")
+    a = ap.parse_args()
+    run(out=a.out, total_cap=a.n_cells, per_type=a.per_type)
+
+
+def run(out=DEFAULT_OUT, total_cap=3000, per_type=250):
+    OUT, TOTAL_CAP, PER_TYPE = out, total_cap, per_type
     os.makedirs(os.path.dirname(OUT), exist_ok=True)
     print(f"opening census {CENSUS_VERSION} ...")
     with cellxgene_census.open_soma(census_version=CENSUS_VERSION) as census:
