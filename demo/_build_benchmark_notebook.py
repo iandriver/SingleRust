@@ -90,6 +90,18 @@ if not BENCH_INPUT.exists():
 adata = ad.read_h5ad(BENCH_INPUT)
 adata.var["mt"] = adata.var_names.str.upper().str.startswith("MT-")
 print(adata)
+
+# Warm-up (untimed): scanpy's HVG/PCA paths JIT-compile and spin up thread pools on first
+# call, and the first Rust invocation pages in the file. Run both once on a tiny subsample so
+# the first *timed* step (QC) isn't charged for that one-time startup.
+_w = adata[:800].copy()
+sc.pp.calculate_qc_metrics(_w, qc_vars=["mt"], percent_top=[50], log1p=True, inplace=True)
+sc.pp.normalize_total(_w); sc.pp.log1p(_w)
+sc.pp.highly_variable_genes(_w, n_top_genes=500, flavor="seurat")
+sc.pp.pca(_w, n_comps=20, svd_solver="randomized", use_highly_variable=True, random_state=0)
+rust_step(BENCH_INPUT, "qc")
+del _w
+print("warm-up done")
 """)
 
 md(r"""

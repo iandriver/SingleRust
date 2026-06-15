@@ -97,6 +97,60 @@ fn main() -> anyhow::Result<()> {
             maybe_write(&adata, output)?;
             return Ok(());
         }
+        // Full core pipeline in one process (for the cells-vs-runtime scaling sweep): each
+        // step feeds the next in memory, and per-step + total compute times are printed.
+        "all" => {
+            let mut total = 0.0;
+            let mut timed = |label: &str, dur: f64| {
+                total += dur;
+                println!("ALL_{label}={dur}");
+            };
+
+            let s = Instant::now();
+            qc_metrics(&adata)?;
+            timed("qc", s.elapsed().as_secs_f64());
+
+            let s = Instant::now();
+            normalize_expression(&adata.x(), 10_000, &Direction::ROW, None)?;
+            timed("normalize", s.elapsed().as_secs_f64());
+
+            let s = Instant::now();
+            log1p_expression(&adata.x(), None)?;
+            timed("log1p", s.elapsed().as_secs_f64());
+
+            let s = Instant::now();
+            compute_highly_variable_genes(
+                &adata,
+                Some(HVGParams {
+                    n_top_genes: Some(2000),
+                    ..Default::default()
+                }),
+            )?;
+            timed("hvg", s.elapsed().as_secs_f64());
+
+            let s = Instant::now();
+            let hvg_mask = read_bool_var(&adata, "highly_variable")?;
+            run_pca_inplace::<f64>(
+                &adata,
+                Some(FeatureSelectionMethod::HighlyVariableSelection(hvg_mask)),
+                Some(true),
+                Some(false),
+                Some(50),
+                None,
+                Some(42),
+                Some(SVDMethod::Random {
+                    n_oversamples: 10,
+                    n_power_iterations: 7,
+                    normalizer: PowerIterationNormalizer::QR,
+                }),
+                None,
+            )?;
+            timed("pca", s.elapsed().as_secs_f64());
+
+            println!("STEP_SECONDS={total}");
+            maybe_write(&adata, output)?;
+            return Ok(());
+        }
         other => anyhow::bail!("unknown step '{other}'"),
     }
     println!("STEP_SECONDS={}", t.elapsed().as_secs_f64());

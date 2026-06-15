@@ -41,20 +41,43 @@ is measured separately and excluded). scanpy produces the state *before* each st
 binary (`examples/bench_step.rs`) runs that same step on that same state, so the comparison is
 apples-to-apples.
 
-Indicative result on an 18-core machine, **50,000 cells × 35,507 genes**:
+A warm-up pass runs first so the timings aren't charged for scanpy's one-time numba JIT / thread
+pool startup. Indicative result on an 18-core machine, **50,000 cells × 35,507 genes**:
 
 | step      | scanpy | SingleRust | speedup |
 |-----------|-------:|-----------:|--------:|
-| qc        | 4.58s  | 1.07s      | 4.3×    |
-| normalize | 0.08s  | 0.01s      | 7.8×    |
-| log1p     | 0.19s  | 0.14s      | 1.4×    |
-| hvg       | 0.83s  | 0.12s      | 7.0×    |
-| pca       | 6.73s  | 1.04s      | 6.5×    |
-| ora\*     | 1.43s  | 0.44s      | 3.2×    |
-| **total** | 13.8s  | 2.8s       | **4.9×**|
+| qc        | 0.85s  | 1.13s      | 0.75×   |
+| normalize | 0.10s  | 0.01s      | 8.2×    |
+| log1p     | 0.20s  | 0.15s      | 1.4×    |
+| hvg       | 0.31s  | 0.12s      | 2.5×    |
+| pca       | 6.44s  | 1.06s      | 6.1×    |
+| ora\*     | 1.47s  | 0.46s      | 3.2×    |
+| **total** | 9.37s  | 2.93s      | **3.2×**|
+
+SingleRust wins decisively on the heavy/vectorizable steps (PCA ~6×, normalize ~8×). QC is the
+exception — scanpy's optimized C path slightly beats SingleRust's `qc_metrics` here (the top-N
+segment proportions are the cost), an honest result worth flagging rather than hiding.
 
 \* ORA has no scanpy equivalent; compared against a NumPy/SciPy implementation of the same
 hypergeometric algorithm. Numbers are machine-dependent — re-run the notebook to get yours.
+
+### Scaling: runtime vs cell count
+
+`scverse_scaling.ipynb` sweeps the cell count (3k → 50k) and runs the full core pipeline
+(QC → normalize → log1p → HVG → PCA) at each size with both tools. SingleRust scales close to
+linearly with the number of non-zeros, while scanpy carries higher fixed per-step overhead:
+
+| cells  | scanpy | SingleRust | speedup |
+|--------|-------:|-----------:|--------:|
+| 3,000  | 1.80s  | 0.21s      | 8.5×    |
+| 6,000  | 3.38s  | 0.37s      | 9.1×    |
+| 12,500 | 5.59s  | 0.69s      | 8.1×    |
+| 25,000 | 6.12s  | 1.35s      | 4.5×    |
+| 50,000 | 7.77s  | 2.62s      | 3.0×    |
+
+SingleRust is faster at every size (3–9×). The margin is largest at moderate sizes — where
+scanpy's fixed overhead dominates — and narrows by 50k as both become compute-bound (PCA, the
+heaviest step, stays a steady ~6×).
 
 ## Running the benchmark
 
@@ -66,17 +89,20 @@ pip install -r demo/requirements.txt
 # Rust side needs cmake (anndata-hdf5 builds HDF5 from source): brew install cmake
 
 jupyter nbconvert --to notebook --execute --inplace \
-    --ExecutePreprocessor.timeout=3600 demo/scverse_benchmark.ipynb
+    --ExecutePreprocessor.timeout=3600 demo/scverse_benchmark.ipynb   # per-step head-to-head
+jupyter nbconvert --to notebook --execute --inplace \
+    --ExecutePreprocessor.timeout=3600 demo/scverse_scaling.ipynb     # runtime vs cell count
 ```
 
-The notebook fetches the dataset (first run only, via `demo/prepare_data.py --n-cells 50000`),
-builds the Rust binary, and runs the comparison.
+The notebooks fetch the dataset (first run only, via `demo/prepare_data.py --n-cells 50000`),
+build the Rust binary, and run the comparison.
 
 ## Files
 
 - `examples/inplace_pipeline.rs` — annotated in-place pipeline.
-- `examples/bench_step.rs` — runs a single step, prints `STEP_SECONDS` (compute only).
-- `demo/scverse_benchmark.ipynb` (+ `_build_benchmark_notebook.py`) — the benchmark.
+- `examples/bench_step.rs` — runs a single step (or `all`), prints `STEP_SECONDS` (compute only).
+- `demo/scverse_benchmark.ipynb` (+ `_build_benchmark_notebook.py`) — per-step benchmark.
+- `demo/scverse_scaling.ipynb` (+ `_build_scaling_notebook.py`) — runtime-vs-cell-count scaling.
 - `demo/prepare_data.py` — fetch a stratified blood slice from the CELLxGENE Census
   (`--n-cells/--per-type/--out`).
 - `demo/markers.tsv` — immune-lineage marker sets for ORA.
