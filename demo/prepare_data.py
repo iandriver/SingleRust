@@ -16,10 +16,14 @@ DEFAULT_OUT = os.path.join(os.path.dirname(__file__), "..", "data", "input.h5ad"
 CENSUS_VERSION = "2023-12-15"  # pinned for reproducibility
 SEED = 0
 
-# Filter: healthy primary blood, a single common assay for homogeneity.
-OBS_FILTER = (
+# Filter: healthy primary blood. The narrow default pins a single assay for homogeneity;
+# `--all-assays` drops that clause (4M+ candidate cells) so very large samples are possible.
+NARROW_FILTER = (
     "tissue_general == 'blood' and is_primary_data == True "
     "and disease == 'normal' and assay == '10x 3\\' v3'"
+)
+ALL_ASSAY_FILTER = (
+    "tissue_general == 'blood' and is_primary_data == True and disease == 'normal'"
 )
 
 
@@ -28,12 +32,15 @@ def main():
     ap.add_argument("--n-cells", type=int, default=3000, help="total cell cap")
     ap.add_argument("--per-type", type=int, default=250, help="cells sampled per cell type")
     ap.add_argument("--out", default=DEFAULT_OUT, help="output .h5ad path")
+    ap.add_argument("--all-assays", action="store_true",
+                    help="drop the single-assay restriction (needed for very large samples)")
     a = ap.parse_args()
-    run(out=a.out, total_cap=a.n_cells, per_type=a.per_type)
+    run(out=a.out, total_cap=a.n_cells, per_type=a.per_type, all_assays=a.all_assays)
 
 
-def run(out=DEFAULT_OUT, total_cap=3000, per_type=250):
+def run(out=DEFAULT_OUT, total_cap=3000, per_type=250, all_assays=False):
     OUT, TOTAL_CAP, PER_TYPE = out, total_cap, per_type
+    obs_filter = ALL_ASSAY_FILTER if all_assays else NARROW_FILTER
     os.makedirs(os.path.dirname(OUT), exist_ok=True)
     print(f"opening census {CENSUS_VERSION} ...")
     with cellxgene_census.open_soma(census_version=CENSUS_VERSION) as census:
@@ -41,7 +48,7 @@ def run(out=DEFAULT_OUT, total_cap=3000, per_type=250):
         obs = cellxgene_census.get_obs(
             census,
             "Homo sapiens",
-            value_filter=OBS_FILTER,
+            value_filter=obs_filter,
             column_names=["soma_joinid", "cell_type"],
         )
         print(f"  {len(obs)} candidate cells, {obs['cell_type'].nunique()} cell types")
