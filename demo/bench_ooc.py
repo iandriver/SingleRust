@@ -25,6 +25,9 @@ ENV = dict(os.environ)
 ENV["PATH"] = "/opt/homebrew/bin:" + str(pathlib.Path.home() / ".cargo" / "bin") + ":" + ENV.get("PATH", "")
 ENV.setdefault("HDF5_USE_FILE_LOCKING", "FALSE")
 
+# Python with the newer stack (anndata>=0.11 + dask) for both scanpy lanes; override with SR_PY.
+PY = os.environ.get("SR_PY", str(ROOT / ".venv-dask" / "bin" / "python"))
+
 
 def run_timed(cmd):
     """Run under /usr/bin/time -l; return (compute_seconds|None, peak_rss_gb)."""
@@ -44,7 +47,14 @@ def run_timed(cmd):
 
 
 def scanpy_inmem(path):
-    return run_timed([sys.executable, str(ROOT / "demo" / "_scanpy_inmem_pp.py"), str(path)])
+    return run_timed([PY, str(ROOT / "demo" / "_scanpy_inmem_pp.py"), str(path)])
+
+
+def scanpy_dask(path, chunk):
+    args = [PY, str(ROOT / "demo" / "_scanpy_dask_pp.py"), str(path)]
+    if chunk:
+        args.append(str(chunk))
+    return run_timed(args)
 
 
 def singlerust_ooc(path, chunk):
@@ -77,11 +87,26 @@ def main():
     s_t, s_rss = scanpy_inmem(path)
     print(f"scanpy in-memory : {s_t:7.2f}s compute | peak RSS {s_rss:6.2f} GB")
 
+    if pathlib.Path(PY).exists():
+        try:
+            d_t, d_rss = scanpy_dask(path, chunk)
+            print(f"scanpy + Dask OOC: {d_t:7.2f}s compute | peak RSS {d_rss:6.2f} GB")
+        except Exception as e:
+            d_rss = None
+            print(f"scanpy + Dask OOC: FAILED ({e})")
+    else:
+        d_rss = None
+        print(f"scanpy + Dask OOC: skipped (no {PY}; create .venv-dask with anndata>=0.11 + dask)")
+
     r_t, r_rss = singlerust_ooc(path, chunk)
     print(f"SingleRust OOC   : {r_t:7.2f}s wall    | peak RSS {r_rss:6.2f} GB")
 
+    print()
     if s_rss and r_rss:
-        print(f"\nmemory: SingleRust OOC uses {s_rss / r_rss:.1f}× LESS peak RAM than scanpy in-memory")
+        print(f"memory: SingleRust OOC uses {s_rss / r_rss:.1f}× less peak RAM than scanpy in-memory")
+    if d_rss and r_rss:
+        print(f"memory: SingleRust OOC uses {d_rss / r_rss:.1f}× less peak RAM than scanpy+Dask "
+              f"(Dask's sparse path barely beats in-memory)")
 
 
 if __name__ == "__main__":
