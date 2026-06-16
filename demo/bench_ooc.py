@@ -14,7 +14,6 @@ performance roadmap. This harness leaves a hook for it.)
 """
 import os
 import re
-import shutil
 import subprocess
 import sys
 import pathlib
@@ -58,16 +57,14 @@ def scanpy_dask(path, chunk):
 
 
 def singlerust_ooc(path, chunk):
-    # Work on a copy so the source file is untouched and both lanes see identical input.
-    work = path.with_suffix(".ooc_work.h5ad")
-    shutil.copyfile(path, work)
+    # Single fused pass (qc + normalize_total + log1p), reading source -> temp output. No 6 GB
+    # copy and one process, so wall time and peak RSS are a single clean /usr/bin/time -l measure.
+    out = path.with_suffix(".ooc_out.h5ad")
     chunk_args = ["--chunk", str(chunk)] if chunk else []
-    # /usr/bin/time -l measures one process; time the two ops separately and sum, taking max RSS.
-    t1, r1 = run_timed([str(BIN), "qc", str(work), *chunk_args])
-    t2, r2 = run_timed([str(BIN), "normalize_total", str(work), "--target-sum", "10000.0", "--log1p", *chunk_args])
-    work.unlink(missing_ok=True)
-    work.with_suffix(".h5ad.tmp").unlink(missing_ok=True)
-    return (t1 or 0) + (t2 or 0), max(r1, r2)  # wall time (incl. file I/O), peak RSS over the two ops
+    t, r = run_timed([str(BIN), "preprocess", str(path), "--out", str(out),
+                      "--target-sum", "10000.0", *chunk_args])
+    out.unlink(missing_ok=True)
+    return t, r
 
 
 def main():

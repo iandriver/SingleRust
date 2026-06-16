@@ -18,15 +18,44 @@ use super::transformation::DEFAULT_CHUNK_SIZE;
 const PERCENT_TOP: [usize; 4] = [50, 100, 200, 500];
 
 /// Per-cell and per-gene accumulators filled during the streaming pass.
-struct QcAcc {
+pub(crate) struct QcAcc {
     // cell-level (indexed by global obs index)
     n_genes: Vec<u32>,
-    total: Vec<f64>,
+    /// Per-cell total counts — this is also the row-sum the normalization step needs, so a fused
+    /// pipeline computes it once here instead of in a separate pass.
+    pub(crate) total: Vec<f64>,
     mito_total: Vec<f64>,
     pct_top: Vec<[f64; PERCENT_TOP.len()]>,
     // gene-level (indexed by var index, accumulated across chunks)
     col_total: Vec<f64>,
     col_nnz: Vec<u32>,
+}
+
+/// Stream `X` once and accumulate all QC metrics; returns the accumulators and the mito mask.
+/// Shared by [`qc_metrics_backed`] and the fused preprocess pipeline.
+pub(crate) fn stream_qc(
+    adata: &AnnData<H5>,
+    chunk_size: usize,
+) -> anyhow::Result<(QcAcc, Vec<bool>)> {
+    let (n_obs, n_vars) = (adata.n_obs(), adata.n_vars());
+    let mito_mask: Vec<bool> = adata
+        .var_names()
+        .into_vec()
+        .iter()
+        .map(|n| n.starts_with("MT-") || n.starts_with("mt-"))
+        .collect();
+    let mut acc = QcAcc {
+        n_genes: vec![0; n_obs],
+        total: vec![0.0; n_obs],
+        mito_total: vec![0.0; n_obs],
+        pct_top: vec![[0.0; PERCENT_TOP.len()]; n_obs],
+        col_total: vec![0.0; n_vars],
+        col_nnz: vec![0; n_vars],
+    };
+    for (chunk, start, _end) in adata.x().iter::<ArrayData>(chunk_size) {
+        accumulate(&chunk, start, &mito_mask, &mut acc)?;
+    }
+    Ok((acc, mito_mask))
 }
 
 /// Compute standard QC metrics out-of-core and store them in `obs`/`var` of the file in place.
@@ -39,29 +68,8 @@ struct QcAcc {
 pub fn qc_metrics_backed(path: &Path, chunk_size: Option<usize>) -> anyhow::Result<()> {
     let chunk_size = chunk_size.unwrap_or(DEFAULT_CHUNK_SIZE);
     let adata = AnnData::<H5>::open(H5::open_rw(path)?)?;
-    let (n_obs, n_vars) = (adata.n_obs(), adata.n_vars());
-
-    let var_names = adata.var_names();
-    let mito_mask: Vec<bool> = var_names
-        .into_vec()
-        .iter()
-        .map(|n| n.starts_with("MT-") || n.starts_with("mt-"))
-        .collect();
-
-    let mut acc = QcAcc {
-        n_genes: vec![0; n_obs],
-        total: vec![0.0; n_obs],
-        mito_total: vec![0.0; n_obs],
-        pct_top: vec![[0.0; PERCENT_TOP.len()]; n_obs],
-        col_total: vec![0.0; n_vars],
-        col_nnz: vec![0; n_vars],
-    };
-
-    // Single streaming pass over X.
-    for (chunk, start, _end) in adata.x().iter::<ArrayData>(chunk_size) {
-        accumulate(&chunk, start, &mito_mask, &mut acc)?;
-    }
-
+    let n_obs = adata.n_obs();
+    let (acc, mito_mask) = stream_qc(&adata, chunk_size)?;
     write_metrics(&adata, &mito_mask, &acc, n_obs)?;
     adata.close()?;
     Ok(())
@@ -134,7 +142,7 @@ where
     Ok(())
 }
 
-fn write_metrics(
+pub(crate) fn write_metrics(
     adata: &AnnData<H5>,
     mito_mask: &[bool],
     acc: &QcAcc,

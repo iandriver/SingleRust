@@ -127,7 +127,7 @@ fn accumulate_row_sums(chunk: &ArrayData, start: usize, sums: &mut [f64]) -> any
 }
 
 /// Scale each row to `target_sum` (rows with zero total are left untouched), optionally log1p.
-fn normalize_chunk(
+pub(crate) fn normalize_chunk(
     chunk: ArrayData,
     start: usize,
     sums: &[f64],

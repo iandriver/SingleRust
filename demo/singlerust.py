@@ -98,5 +98,13 @@ class _PP:
         _run(["normalize_total", str(path), "--target-sum", repr(float(target_sum)), "--log1p",
               *(["--chunk", str(chunk)] if chunk else [])])
 
+    def preprocess(self, adata, *, target_sum=1e4, log1p=True, chunk=None, **_ignored) -> None:
+        """Fused QC + normalize_total + log1p in one out-of-core job (≈ sc.pp QC then
+        normalize_total then log1p). Writes obs/var QC metrics + the normalized X in place."""
+        path = _resolve_path(adata)
+        _run(["preprocess", str(path), "--target-sum", repr(float(target_sum)),
+              *([] if log1p else ["--no-log1p"]),
+              *(["--chunk", str(chunk)] if chunk else [])])
+
 
 pp = _PP()

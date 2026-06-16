@@ -14,6 +14,7 @@
 
 use std::path::{Path, PathBuf};
 
+use single_rust::backed::processing::pipeline::preprocess_backed;
 use single_rust::backed::processing::qc::qc_metrics_backed;
 use single_rust::backed::processing::transformation::{log1p_backed, normalize_total_backed};
 
@@ -23,7 +24,8 @@ fn main() -> anyhow::Result<()> {
         eprintln!(
             "usage:\n  sr_ooc qc <file.h5ad> [--chunk N]\n  \
              sr_ooc normalize_total <file.h5ad> [--target-sum F] [--log1p] [--out OUT] [--chunk N]\n  \
-             sr_ooc log1p <file.h5ad> [--out OUT] [--chunk N]"
+             sr_ooc log1p <file.h5ad> [--out OUT] [--chunk N]\n  \
+             sr_ooc preprocess <file.h5ad> [--target-sum F] [--no-log1p] [--out OUT] [--chunk N]"
         );
         std::process::exit(2);
     }
@@ -50,6 +52,17 @@ fn main() -> anyhow::Result<()> {
             let log1p = flags.iter().any(|f| f == "--log1p");
             in_place_or_out(&input, out, |inp, outp| {
                 normalize_total_backed(inp, outp, target, log1p, chunk)
+            })?;
+        }
+        "preprocess" => {
+            // Fused QC + normalize_total + log1p (log1p on by default; --no-log1p to disable).
+            let target = flag_val(flags, "--target-sum")
+                .map(|s| s.parse())
+                .transpose()?
+                .unwrap_or(1e4);
+            let log1p = !flags.iter().any(|f| f == "--no-log1p");
+            in_place_or_out(&input, out, |inp, outp| {
+                preprocess_backed(inp, outp, target, log1p, chunk)
             })?;
         }
         other => anyhow::bail!("unknown command '{other}'"),

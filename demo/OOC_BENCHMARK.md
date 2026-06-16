@@ -12,19 +12,25 @@ python demo/bench_ooc.py data/bench_input_500k.h5ad 20000
 
 | lane | time | peak RSS |
 |---|---:|---:|
-| scanpy in-memory  | 13.5 s (compute) | 11.7 GB |
-| scanpy + Dask OOC | 92.2 s (compute) | 7.5 GB |
-| **SingleRust OOC** | 128.1 s (wall, incl. I/O) | **2.1 GB** |
+| scanpy in-memory  | 13.5 s (compute) | 13.6 GB |
+| scanpy + Dask OOC | 35.4 s (compute) | 14.5 GB |
+| **SingleRust OOC (fused)** | 45.0 s (wall, incl. I/O) | **2.5 GB** |
 
-**SingleRust OOC uses ~5.6× less peak memory than scanpy in-memory and ~3.6× less than
+**SingleRust OOC uses ~5.4× less peak memory than scanpy in-memory and ~5.8× less than
 scanpy+Dask**, and that footprint is chunk-bounded — it stays roughly flat as the cell count
 grows, whereas scanpy in-memory scales linearly and eventually OOMs (≈46 GB at 2M cells, over a
 48 GB machine). That is the point of out-of-core: process data that does not fit in RAM.
 
-The standout finding is the **Dask lane**: its sparse out-of-core path only modestly reduces
-memory (7.5 vs 11.7 GB) while costing **~7× the runtime** (92 vs 13 s). This is exactly the
-Dask-sparse immaturity scanpy's own issues describe — Dask helps a bit on memory but doesn't reach
-truly bounded memory for sparse single-cell data. Native Rust streaming does (2.1 GB).
+The standout finding is the **Dask lane**: its sparse out-of-core path gives essentially **no
+memory benefit** — peak RSS lands at/above scanpy in-memory (it has measured 7.5–14.5 GB across
+runs, i.e. ≥ in-memory) while still costing 2.6× the runtime. This is exactly the Dask-sparse
+immaturity scanpy's own issues describe. Native Rust streaming is the only lane with truly bounded
+memory (2.5 GB).
+
+The SingleRust lane is a **single fused command** (`sr_ooc preprocess` = QC + normalize_total +
+log1p in one job; the per-cell total computed for QC is reused as the normalization row-sum, so
+it's computed once). Fusing cut its wall time from 128 s (three separate ops + a working copy) to
+45 s — now in the same ballpark as Dask on time, at ~1/6th the memory.
 
 ### Caveats / honest reading
 
