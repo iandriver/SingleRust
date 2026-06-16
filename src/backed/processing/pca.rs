@@ -23,7 +23,9 @@ use anndata_hdf5::H5;
 use anyhow::bail;
 use nalgebra::{DMatrix, SymmetricEigen};
 use ndarray::Array2;
+use rayon::prelude::*;
 
+use super::det::det_block_reduce;
 use super::transformation::DEFAULT_CHUNK_SIZE;
 
 /// Run PCA out-of-core over the genes flagged in `var["highly_variable"]`, writing the cell
@@ -59,10 +61,18 @@ pub fn pca_backed(
     }
 
     // ---- Pass 1: Gram matrix + per-gene sums over selected genes ----
+    // Each read-chunk's contribution is computed with a deterministic block reduction (parallel
+    // across fixed row-blocks, ordered merge), then added to the running totals in chunk order.
     let mut gram = vec![0.0_f64; n_sel * n_sel];
     let mut col_sum = vec![0.0_f64; n_sel];
     for (chunk, _start, _end) in adata.x().iter::<ArrayData>(chunk_size) {
-        accumulate_gram(&chunk, &local, n_sel, &mut gram, &mut col_sum)?;
+        let (g_chunk, cs_chunk) = gram_chunk(&chunk, &local, n_sel)?;
+        for (a, b) in gram.iter_mut().zip(g_chunk.iter()) {
+            *a += *b;
+        }
+        for (a, b) in col_sum.iter_mut().zip(cs_chunk.iter()) {
+            *a += *b;
+        }
     }
 
     // ---- Covariance + eigendecomposition (small, n_sel × n_sel) ----
@@ -92,9 +102,17 @@ pub fn pca_backed(
         .collect();
 
     // ---- Pass 2: project centered cells onto the top axes ----
+    // Each cell's embedding is independent (a fixed-order sum over its own nonzeros), so rows are
+    // computed in parallel and written to disjoint positions — order-independent, hence
+    // deterministic, with no cross-row reduction.
     let mut emb = Array2::<f64>::zeros((n_obs, k));
     for (chunk, start, _end) in adata.x().iter::<ArrayData>(chunk_size) {
-        project_chunk(&chunk, start, &local, &eig, &top, &offset, &mut emb)?;
+        let rows = project_chunk(&chunk, &local, &eig, &top, &offset, k)?;
+        for (i, row) in rows.into_iter().enumerate() {
+            for (c, val) in row.into_iter().enumerate() {
+                emb[[start + i, c]] = val;
+            }
+        }
     }
 
     // ---- Store results in place ----
@@ -123,71 +141,97 @@ fn gather_selected<T: Copy + num_traits::ToPrimitive>(
     }
 }
 
-fn accumulate_gram(
+/// One chunk's contribution to the Gram matrix and per-gene sums, via a deterministic block
+/// reduction over the chunk's rows. Returns `(gram_flat, col_sum)`.
+fn gram_chunk(
     chunk: &ArrayData,
     local: &[i64],
     n_sel: usize,
-    gram: &mut [f64],
-    col_sum: &mut [f64],
-) -> anyhow::Result<()> {
-    let mut buf: Vec<(usize, f64)> = Vec::new();
-    macro_rules! go {
-        ($m:expr) => {{
-            for row in $m.row_iter() {
-                gather_selected(row.col_indices(), row.values(), local, &mut buf);
-                for &(li, v) in buf.iter() {
-                    col_sum[li] += v;
-                }
-                for &(la, va) in buf.iter() {
-                    let base = la * n_sel;
-                    for &(lb, vb) in buf.iter() {
-                        gram[base + lb] += va * vb;
-                    }
-                }
-            }
-        }};
-    }
+) -> anyhow::Result<(Vec<f64>, Vec<f64>)> {
     match chunk {
-        ArrayData::CsrMatrix(DynCsrMatrix::F32(m)) => go!(m),
-        ArrayData::CsrMatrix(DynCsrMatrix::F64(m)) => go!(m),
+        ArrayData::CsrMatrix(DynCsrMatrix::F32(m)) => Ok(gram_rows(m, local, n_sel)),
+        ArrayData::CsrMatrix(DynCsrMatrix::F64(m)) => Ok(gram_rows(m, local, n_sel)),
         other => bail!("OOC PCA supports only F32/F64 CSR matrices, got {:?}", other),
     }
-    Ok(())
 }
 
+fn gram_rows<T: Copy + num_traits::ToPrimitive + Sync>(
+    m: &nalgebra_sparse::CsrMatrix<T>,
+    local: &[i64],
+    n_sel: usize,
+) -> (Vec<f64>, Vec<f64>) {
+    det_block_reduce(
+        m.nrows(),
+        || (vec![0.0_f64; n_sel * n_sel], vec![0.0_f64; n_sel]),
+        |(gram, col_sum), r| {
+            let row = m.row(r);
+            let mut buf: Vec<(usize, f64)> = Vec::new();
+            gather_selected(row.col_indices(), row.values(), local, &mut buf);
+            for &(li, v) in buf.iter() {
+                col_sum[li] += v;
+            }
+            for &(la, va) in buf.iter() {
+                let base = la * n_sel;
+                for &(lb, vb) in buf.iter() {
+                    gram[base + lb] += va * vb;
+                }
+            }
+        },
+        |(ag, acs), (g, cs)| {
+            for (a, b) in ag.iter_mut().zip(g.iter()) {
+                *a += *b;
+            }
+            for (a, b) in acs.iter_mut().zip(cs.iter()) {
+                *a += *b;
+            }
+        },
+    )
+}
+
+/// Project a chunk's cells onto the top axes; returns one `k`-vector per row (in row order).
+/// Rows are independent so they are computed in parallel; each value is a fixed-order sum, so the
+/// result does not depend on the thread count.
 fn project_chunk(
     chunk: &ArrayData,
-    start: usize,
     local: &[i64],
     eig: &SymmetricEigen<f64, nalgebra::Dyn>,
     top: &[usize],
     offset: &[f64],
-    emb: &mut Array2<f64>,
-) -> anyhow::Result<()> {
-    let k = top.len();
-    let mut buf: Vec<(usize, f64)> = Vec::new();
-    macro_rules! go {
-        ($m:expr) => {{
-            for (i, row) in $m.row_iter().enumerate() {
-                let g = start + i;
-                gather_selected(row.col_indices(), row.values(), local, &mut buf);
-                for c in 0..k {
-                    emb[[g, c]] = -offset[c];
-                }
-                for &(li, v) in buf.iter() {
-                    for c in 0..k {
-                        emb[[g, c]] += v * eig.eigenvectors[(li, top[c])];
-                    }
-                }
-            }
-        }};
-    }
+    k: usize,
+) -> anyhow::Result<Vec<Vec<f64>>> {
     match chunk {
-        ArrayData::CsrMatrix(DynCsrMatrix::F32(m)) => go!(m),
-        ArrayData::CsrMatrix(DynCsrMatrix::F64(m)) => go!(m),
+        ArrayData::CsrMatrix(DynCsrMatrix::F32(m)) => Ok(project_rows(m, local, eig, top, offset, k)),
+        ArrayData::CsrMatrix(DynCsrMatrix::F64(m)) => Ok(project_rows(m, local, eig, top, offset, k)),
         other => bail!("OOC PCA supports only F32/F64 CSR matrices, got {:?}", other),
     }
-    Ok(())
+}
+
+fn project_rows<T: Copy + num_traits::ToPrimitive + Sync>(
+    m: &nalgebra_sparse::CsrMatrix<T>,
+    local: &[i64],
+    eig: &SymmetricEigen<f64, nalgebra::Dyn>,
+    top: &[usize],
+    offset: &[f64],
+    k: usize,
+) -> Vec<Vec<f64>> {
+    (0..m.nrows())
+        .into_par_iter()
+        .map(|r| {
+            let row = m.row(r);
+            let mut buf: Vec<(usize, f64)> = Vec::new();
+            gather_selected(row.col_indices(), row.values(), local, &mut buf);
+            let mut out = vec![0.0_f64; k];
+            for (c, o) in out.iter_mut().enumerate() {
+                *o = -offset[c];
+            }
+            for &(li, v) in buf.iter() {
+                for (c, o) in out.iter_mut().enumerate() {
+                    *o += v * eig.eigenvectors[(li, top[c])];
+                }
+            }
+            out
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -289,6 +333,74 @@ mod tests {
             assert!((norm_ref - norm_ooc).abs() < 1e-6, "col {c} norm {norm_ref} vs {norm_ooc}");
         }
         std::fs::remove_file(path).ok();
+        Ok(())
+    }
+
+    /// Write a CSR fixture with all genes flagged highly_variable.
+    fn write_pca_fixture(path: &Path, nr: usize, nc: usize) -> anyhow::Result<()> {
+        let mut coo = CooMatrix::<f32>::new(nr, nc);
+        for i in 0..nr {
+            for j in 0..nc {
+                let v = (((i * 31 + j * 17) % 13) as f32) * 0.25;
+                if v != 0.0 {
+                    coo.push(i, j, v);
+                }
+            }
+        }
+        let a = AnnData::<H5>::new(path)?;
+        a.set_obs_names((0..nr).map(|i| format!("c{i}")).collect::<Vec<_>>().into())?;
+        a.set_var_names((0..nc).map(|j| format!("g{j}")).collect::<Vec<_>>().into())?;
+        a.set_x(ArrayData::CsrMatrix(DynCsrMatrix::F32(CsrMatrix::from(&coo))))?;
+        let mut var = a.read_var()?;
+        var.with_column(polars::prelude::Column::new("highly_variable".into(), vec![true; nc]))?;
+        a.set_var(var)?;
+        a.close()?;
+        Ok(())
+    }
+
+    fn read_pca(path: &Path) -> anyhow::Result<(Vec<f64>, Vec<f64>)> {
+        let a = AnnData::<H5>::open(H5::open(path)?)?;
+        let emb = match a.obsm().get_item::<ArrayData>("X_pca")?.unwrap() {
+            ArrayData::Array(DynArray::F64(arr)) => arr.into_raw_vec_and_offset().0,
+            other => panic!("unexpected obsm {:?}", other),
+        };
+        let vr = match a.uns().get_item::<Data>("pca_variance_ratio")?.unwrap() {
+            Data::ArrayData(ArrayData::Array(DynArray::F64(arr))) => arr.into_raw_vec_and_offset().0,
+            other => panic!("unexpected uns {:?}", other),
+        };
+        a.close()?;
+        Ok((emb, vr))
+    }
+
+    /// Determinism: PCA run with 1 thread vs 8 threads (and a span of chunk sizes that force
+    /// different row-block partitions) must produce **bit-identical** embeddings and variance
+    /// ratios. This guards the parallel Gram reduction's fixed summation order.
+    #[test]
+    fn ooc_pca_is_deterministic_across_thread_counts() -> anyhow::Result<()> {
+        let (nr, nc, k) = (5000usize, 60usize, 10usize);
+
+        let run = |threads: usize, chunk: usize, tag: &str| -> anyhow::Result<(Vec<f64>, Vec<f64>)> {
+            let path = tmp(&format!("sr_pca_det_{tag}.h5ad"));
+            write_pca_fixture(&path, nr, nc)?;
+            let pool = rayon::ThreadPoolBuilder::new().num_threads(threads).build()?;
+            pool.install(|| pca_backed(&path, k, None, Some(chunk)))?;
+            let out = read_pca(&path)?;
+            std::fs::remove_file(path).ok();
+            Ok(out)
+        };
+
+        // Baseline: single-threaded.
+        let (emb1, vr1) = run(1, 1000, "t1")?;
+        // 8 threads, same chunking -> must match bit-for-bit.
+        let (emb8, vr8) = run(8, 1000, "t8")?;
+        assert_eq!(emb1, emb8, "embeddings differ between 1 and 8 threads");
+        assert_eq!(vr1, vr8, "variance ratios differ between 1 and 8 threads");
+
+        // Repeat the 8-thread run -> identical to itself (no run-to-run drift).
+        let (emb8b, vr8b) = run(8, 1000, "t8b")?;
+        assert_eq!(emb8, emb8b, "8-thread run not reproducible across repeats");
+        assert_eq!(vr8, vr8b);
+
         Ok(())
     }
 }

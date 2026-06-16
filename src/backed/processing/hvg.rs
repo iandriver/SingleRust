@@ -18,6 +18,7 @@ use polars::prelude::Column;
 use crate::memory::processing::hvg::seurat_select;
 use crate::shared::processing::HVGParams;
 
+use super::det::det_block_reduce;
 use super::transformation::DEFAULT_CHUNK_SIZE;
 
 /// Compute highly variable genes (Seurat flavor) out-of-core and write the results
@@ -31,11 +32,18 @@ pub fn highly_variable_genes_backed(
     let adata = AnnData::<H5>::open(H5::open_rw(path)?)?;
     let (n_obs, n_vars) = (adata.n_obs(), adata.n_vars());
 
-    // Streaming pass: per-gene sum and sum of squares.
+    // Streaming pass: per-gene sum and sum of squares. Each chunk is reduced with a deterministic
+    // block reduction (parallel, fixed summation order), then added to the running totals.
     let mut col_sum = vec![0.0_f64; n_vars];
     let mut col_sumsq = vec![0.0_f64; n_vars];
     for (chunk, _start, _end) in adata.x().iter::<ArrayData>(chunk_size) {
-        accumulate_sumsq(&chunk, &mut col_sum, &mut col_sumsq)?;
+        let (s, sq) = sumsq_chunk(&chunk, n_vars)?;
+        for (a, b) in col_sum.iter_mut().zip(s.iter()) {
+            *a += *b;
+        }
+        for (a, b) in col_sumsq.iter_mut().zip(sq.iter()) {
+            *a += *b;
+        }
     }
 
     let n = n_obs as f64;
@@ -72,25 +80,39 @@ pub fn highly_variable_genes_backed(
     Ok(())
 }
 
-fn accumulate_sumsq(chunk: &ArrayData, sum: &mut [f64], sumsq: &mut [f64]) -> anyhow::Result<()> {
+/// One chunk's per-gene `(sum, sum_of_squares)` via a deterministic block reduction over rows.
+fn sumsq_chunk(chunk: &ArrayData, n_vars: usize) -> anyhow::Result<(Vec<f64>, Vec<f64>)> {
     match chunk {
-        ArrayData::CsrMatrix(DynCsrMatrix::F32(m)) => {
-            for (&c, &v) in m.col_indices().iter().zip(m.values().iter()) {
-                let v = v as f64;
-                sum[c] += v;
-                sumsq[c] += v * v;
-            }
-            Ok(())
-        }
-        ArrayData::CsrMatrix(DynCsrMatrix::F64(m)) => {
-            for (&c, &v) in m.col_indices().iter().zip(m.values().iter()) {
-                sum[c] += v;
-                sumsq[c] += v * v;
-            }
-            Ok(())
-        }
+        ArrayData::CsrMatrix(DynCsrMatrix::F32(m)) => Ok(sumsq_rows(m, n_vars)),
+        ArrayData::CsrMatrix(DynCsrMatrix::F64(m)) => Ok(sumsq_rows(m, n_vars)),
         other => bail!("OOC HVG supports only F32/F64 CSR matrices, got {:?}", other),
     }
+}
+
+fn sumsq_rows<T: Copy + num_traits::ToPrimitive + Sync>(
+    m: &nalgebra_sparse::CsrMatrix<T>,
+    n_vars: usize,
+) -> (Vec<f64>, Vec<f64>) {
+    det_block_reduce(
+        m.nrows(),
+        || (vec![0.0_f64; n_vars], vec![0.0_f64; n_vars]),
+        |(sum, sumsq), r| {
+            let row = m.row(r);
+            for (&c, &v) in row.col_indices().iter().zip(row.values().iter()) {
+                let v = v.to_f64().unwrap_or(0.0);
+                sum[c] += v;
+                sumsq[c] += v * v;
+            }
+        },
+        |(asum, asq), (sum, sq)| {
+            for (a, b) in asum.iter_mut().zip(sum.iter()) {
+                *a += *b;
+            }
+            for (a, b) in asq.iter_mut().zip(sq.iter()) {
+                *a += *b;
+            }
+        },
+    )
 }
 
 #[cfg(test)]
@@ -157,6 +179,48 @@ mod tests {
         assert_eq!(ref_mask, ooc_mask, "OOC HVG mask must equal in-memory HVG mask");
         assert!(ooc_mask.iter().any(|&b| b), "expected some HVGs selected");
         std::fs::remove_file(path).ok();
+        Ok(())
+    }
+
+    /// Determinism: HVG run with 1 vs 8 threads must give bit-identical means/dispersions and the
+    /// same selection (guards the parallel sum/sum-of-squares reduction).
+    #[test]
+    fn ooc_hvg_is_deterministic_across_thread_counts() -> anyhow::Result<()> {
+        let (nr, nc) = (5000usize, 80usize);
+        let build = |tag: &str| -> anyhow::Result<std::path::PathBuf> {
+            let mut coo = CooMatrix::<f32>::new(nr, nc);
+            for i in 0..nr {
+                for j in 0..nc {
+                    let v = (((i * 29 + j * 11) % 17) as f32) * (0.5 + (j as f32) * 0.1);
+                    if v != 0.0 {
+                        coo.push(i, j, v);
+                    }
+                }
+            }
+            let p = tmp(&format!("sr_hvg_det_{tag}.h5ad"));
+            let a = AnnData::<H5>::new(&p)?;
+            a.set_obs_names((0..nr).map(|i| format!("c{i}")).collect::<Vec<_>>().into())?;
+            a.set_var_names((0..nc).map(|j| format!("g{j}")).collect::<Vec<_>>().into())?;
+            a.set_x(ArrayData::CsrMatrix(DynCsrMatrix::F32(CsrMatrix::from(&coo))))?;
+            a.close()?;
+            Ok(p)
+        };
+        let run = |threads: usize, tag: &str| -> anyhow::Result<(Vec<f64>, Vec<bool>)> {
+            let p = build(tag)?;
+            let pool = rayon::ThreadPoolBuilder::new().num_threads(threads).build()?;
+            pool.install(|| highly_variable_genes_backed(&p, Some(20), Some(1000)))?;
+            let a = AnnData::<H5>::open(H5::open(&p)?)?;
+            let var = a.read_var()?;
+            let means = var.column("means")?.f64()?.into_iter().map(|x| x.unwrap_or(f64::NAN)).collect();
+            let hv = var.column("highly_variable")?.bool()?.into_iter().map(|b| b.unwrap_or(false)).collect();
+            a.close()?;
+            std::fs::remove_file(p).ok();
+            Ok((means, hv))
+        };
+        let (m1, h1) = run(1, "t1")?;
+        let (m8, h8) = run(8, "t8")?;
+        assert_eq!(m1, m8, "HVG means differ between 1 and 8 threads");
+        assert_eq!(h1, h8, "HVG selection differs between 1 and 8 threads");
         Ok(())
     }
 }

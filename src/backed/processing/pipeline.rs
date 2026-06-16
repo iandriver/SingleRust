@@ -117,4 +117,51 @@ mod tests {
         }
         Ok(())
     }
+
+    /// Determinism: the fused preprocess (parallel QC + normalize/log1p) under 1 vs 8 threads must
+    /// produce bit-identical X values and obs totals.
+    #[test]
+    fn preprocess_is_deterministic_across_thread_counts() -> anyhow::Result<()> {
+        let (nr, nc) = (4000usize, 60usize);
+        let build = |tag: &str| -> anyhow::Result<std::path::PathBuf> {
+            let mut coo = CooMatrix::<f32>::new(nr, nc);
+            for i in 0..nr {
+                for j in 0..nc {
+                    let v = (((i * 23 + j * 13) % 9) as f32) * 0.5;
+                    if v != 0.0 {
+                        coo.push(i, j, v);
+                    }
+                }
+            }
+            let p = tmp(&format!("sr_pre_det_{tag}.h5ad"));
+            let a = AnnData::<H5>::new(&p)?;
+            a.set_obs_names((0..nr).map(|i| format!("c{i}")).collect::<Vec<_>>().into())?;
+            a.set_var_names((0..nc).map(|j| format!("g{j}")).collect::<Vec<_>>().into())?;
+            a.set_x(ArrayData::CsrMatrix(DynCsrMatrix::F32(CsrMatrix::from(&coo))))?;
+            a.close()?;
+            Ok(p)
+        };
+        let run = |threads: usize, tag: &str| -> anyhow::Result<(Vec<f32>, Vec<f64>)> {
+            let inp = build(tag)?;
+            let out = tmp(&format!("sr_pre_det_out_{tag}.h5ad"));
+            let pool = rayon::ThreadPoolBuilder::new().num_threads(threads).build()?;
+            pool.install(|| preprocess_backed(&inp, &out, 1e4, true, Some(700)))?;
+            let a = AnnData::<H5>::open(H5::open(&out)?)?;
+            let xvals = match a.x().get::<ArrayData>()?.unwrap() {
+                ArrayData::CsrMatrix(DynCsrMatrix::F32(m)) => m.values().to_vec(),
+                _ => panic!("expected CSR f32"),
+            };
+            let total = a.read_obs()?.column("total_counts")?.f64()?.into_iter().map(|x| x.unwrap_or(f64::NAN)).collect();
+            a.close()?;
+            for p in [inp, out] {
+                std::fs::remove_file(p).ok();
+            }
+            Ok((xvals, total))
+        };
+        let (x1, t1) = run(1, "t1")?;
+        let (x8, t8) = run(8, "t8")?;
+        assert_eq!(x1, x8, "X values differ across thread counts");
+        assert_eq!(t1, t8, "obs total_counts differ across thread counts");
+        Ok(())
+    }
 }

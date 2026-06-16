@@ -13,9 +13,20 @@ use anndata_hdf5::H5;
 use anyhow::bail;
 use polars::prelude::Column;
 
+use super::det::det_block_reduce;
 use super::transformation::DEFAULT_CHUNK_SIZE;
 
 const PERCENT_TOP: [usize; 4] = [50, 100, 200, 500];
+
+/// Per-cell metrics for one cell: (n_genes, total, mito_total, top-N proportions).
+type CellMetrics = (u32, f64, f64, [f64; PERCENT_TOP.len()]);
+
+/// One chunk's QC contribution: per-cell metrics (in row order) + per-gene partials.
+struct QcChunk {
+    cells: Vec<CellMetrics>,
+    col_total: Vec<f64>,
+    col_nnz: Vec<u32>,
+}
 
 /// Per-cell and per-gene accumulators filled during the streaming pass.
 pub(crate) struct QcAcc {
@@ -53,7 +64,20 @@ pub(crate) fn stream_qc(
         col_nnz: vec![0; n_vars],
     };
     for (chunk, start, _end) in adata.x().iter::<ArrayData>(chunk_size) {
-        accumulate(&chunk, start, &mito_mask, &mut acc)?;
+        let qc = qc_chunk(&chunk, &mito_mask, n_vars)?;
+        for (i, (ng, tot, mito, pct)) in qc.cells.into_iter().enumerate() {
+            let g = start + i;
+            acc.n_genes[g] = ng;
+            acc.total[g] = tot;
+            acc.mito_total[g] = mito;
+            acc.pct_top[g] = pct;
+        }
+        for (a, b) in acc.col_total.iter_mut().zip(qc.col_total.iter()) {
+            *a += *b;
+        }
+        for (a, b) in acc.col_nnz.iter_mut().zip(qc.col_nnz.iter()) {
+            *a += *b;
+        }
     }
     Ok((acc, mito_mask))
 }
@@ -75,71 +99,78 @@ pub fn qc_metrics_backed(path: &Path, chunk_size: Option<usize>) -> anyhow::Resu
     Ok(())
 }
 
-fn accumulate(
-    chunk: &ArrayData,
-    start: usize,
-    mito_mask: &[bool],
-    acc: &mut QcAcc,
-) -> anyhow::Result<()> {
+/// One chunk's QC contribution via a deterministic block reduction over rows. Per-cell metrics
+/// come out in row order; per-gene partials are summed in fixed (block) order.
+fn qc_chunk(chunk: &ArrayData, mito_mask: &[bool], n_vars: usize) -> anyhow::Result<QcChunk> {
     match chunk {
-        ArrayData::CsrMatrix(DynCsrMatrix::F32(m)) => accumulate_rows(m, start, mito_mask, acc),
-        ArrayData::CsrMatrix(DynCsrMatrix::F64(m)) => accumulate_rows(m, start, mito_mask, acc),
+        ArrayData::CsrMatrix(DynCsrMatrix::F32(m)) => Ok(qc_rows(m, mito_mask, n_vars)),
+        ArrayData::CsrMatrix(DynCsrMatrix::F64(m)) => Ok(qc_rows(m, mito_mask, n_vars)),
         other => bail!("OOC qc supports only F32/F64 CSR matrices, got {:?}", other),
     }
 }
 
-fn accumulate_rows<T>(
+fn qc_rows<T: Copy + num_traits::ToPrimitive + Sync>(
     m: &nalgebra_sparse::CsrMatrix<T>,
-    start: usize,
     mito_mask: &[bool],
-    acc: &mut QcAcc,
-) -> anyhow::Result<()>
-where
-    T: Copy + num_traits::ToPrimitive,
-{
-    let mut scratch: Vec<f64> = Vec::new();
-    for (i, row) in m.row_iter().enumerate() {
-        let g = start + i;
-        let cols = row.col_indices();
-        let vals = row.values();
-
-        let mut total = 0.0;
-        let mut mito = 0.0;
-        for (&c, &v) in cols.iter().zip(vals.iter()) {
-            let v = v.to_f64().unwrap_or(0.0);
-            total += v;
-            if mito_mask[c] {
-                mito += v;
+    n_vars: usize,
+) -> QcChunk {
+    det_block_reduce(
+        m.nrows(),
+        || QcChunk {
+            cells: Vec::new(),
+            col_total: vec![0.0_f64; n_vars],
+            col_nnz: vec![0_u32; n_vars],
+        },
+        |p, r| {
+            let row = m.row(r);
+            let cols = row.col_indices();
+            let vals = row.values();
+            let mut total = 0.0;
+            let mut mito = 0.0;
+            for (&c, &v) in cols.iter().zip(vals.iter()) {
+                let v = v.to_f64().unwrap_or(0.0);
+                total += v;
+                if mito_mask[c] {
+                    mito += v;
+                }
+                p.col_total[c] += v;
+                p.col_nnz[c] += 1;
             }
-            acc.col_total[c] += v;
-            acc.col_nnz[c] += 1;
-        }
-        acc.n_genes[g] = vals.len() as u32;
-        acc.total[g] = total;
-        acc.mito_total[g] = mito;
-
-        // top-N segment proportions: sum of the largest N values / total.
-        if total > 0.0 {
-            scratch.clear();
-            scratch.extend(vals.iter().map(|&v| v.to_f64().unwrap_or(0.0)));
-            scratch.sort_unstable_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
-            let mut running = 0.0;
-            let mut next = 0;
-            for (rank, &v) in scratch.iter().enumerate() {
-                running += v;
-                while next < PERCENT_TOP.len() && rank + 1 == PERCENT_TOP[next].min(scratch.len()) {
-                    acc.pct_top[g][next] = running / total * 100.0;
+            let mut pct = [0.0_f64; PERCENT_TOP.len()];
+            if total > 0.0 {
+                let mut scratch: Vec<f64> =
+                    vals.iter().map(|&v| v.to_f64().unwrap_or(0.0)).collect();
+                scratch.sort_unstable_by(|a, b| {
+                    b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal)
+                });
+                let mut running = 0.0;
+                let mut next = 0;
+                for (rank, &v) in scratch.iter().enumerate() {
+                    running += v;
+                    while next < PERCENT_TOP.len()
+                        && rank + 1 == PERCENT_TOP[next].min(scratch.len())
+                    {
+                        pct[next] = running / total * 100.0;
+                        next += 1;
+                    }
+                }
+                while next < PERCENT_TOP.len() {
+                    pct[next] = 100.0;
                     next += 1;
                 }
             }
-            // if a requested top-N exceeds nnz, it captures all counts -> 100%
-            while next < PERCENT_TOP.len() {
-                acc.pct_top[g][next] = 100.0;
-                next += 1;
+            p.cells.push((vals.len() as u32, total, mito, pct));
+        },
+        |acc, p| {
+            acc.cells.extend(p.cells);
+            for (a, b) in acc.col_total.iter_mut().zip(p.col_total.iter()) {
+                *a += *b;
             }
-        }
-    }
-    Ok(())
+            for (a, b) in acc.col_nnz.iter_mut().zip(p.col_nnz.iter()) {
+                *a += *b;
+            }
+        },
+    )
 }
 
 pub(crate) fn write_metrics(
@@ -262,6 +293,44 @@ mod tests {
 
         adata.close()?;
         std::fs::remove_file(path).ok();
+        Ok(())
+    }
+
+    /// Determinism: QC under 1 vs 8 threads must yield bit-identical obs/var metrics (guards the
+    /// parallel per-gene reduction and per-cell ordering).
+    #[test]
+    fn ooc_qc_is_deterministic_across_thread_counts() -> anyhow::Result<()> {
+        let (nr, nc) = (4000usize, 50usize);
+        let names: Vec<&str> = (0..nc)
+            .map(|j| if j < 3 { "MT-x" } else { "g" })
+            .collect();
+        let build = |tag: &str| -> anyhow::Result<std::path::PathBuf> {
+            let rows: Vec<Vec<f64>> = (0..nr)
+                .map(|i| (0..nc).map(|j| (((i * 19 + j * 7) % 11) as f64)).collect())
+                .collect();
+            let p = tmp(&format!("sr_qc_det_{tag}.h5ad"));
+            write_fixture(&p, &rows, &names)?;
+            Ok(p)
+        };
+        let run = |threads: usize, tag: &str| -> anyhow::Result<(Vec<f64>, Vec<f64>, Vec<f64>)> {
+            let p = build(tag)?;
+            let pool = rayon::ThreadPoolBuilder::new().num_threads(threads).build()?;
+            pool.install(|| qc_metrics_backed(&p, Some(700)))?;
+            let a = AnnData::<H5>::open(H5::open(&p)?)?;
+            let obs = a.read_obs()?;
+            let var = a.read_var()?;
+            let total = obs.column("total_counts")?.f64()?.into_iter().map(|x| x.unwrap_or(f64::NAN)).collect();
+            let pct = obs.column("pct_counts_in_top_50_genes")?.f64()?.into_iter().map(|x| x.unwrap_or(f64::NAN)).collect();
+            let vtot = var.column("total_counts")?.f64()?.into_iter().map(|x| x.unwrap_or(f64::NAN)).collect();
+            a.close()?;
+            std::fs::remove_file(p).ok();
+            Ok((total, pct, vtot))
+        };
+        let a = run(1, "t1")?;
+        let b = run(8, "t8")?;
+        assert_eq!(a.0, b.0, "obs total_counts differ across thread counts");
+        assert_eq!(a.1, b.1, "obs pct_top differ across thread counts");
+        assert_eq!(a.2, b.2, "var total_counts differ across thread counts");
         Ok(())
     }
 }

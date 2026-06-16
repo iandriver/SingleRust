@@ -12,6 +12,26 @@
 
 The benchmark below covers the QC + normalize_total + log1p portion.
 
+## Deterministic parallelism
+
+The compute-bound passes — QC accumulation, HVG sum/sum-of-squares, and PCA's gene×gene Gram
+matrix — are parallelized with rayon. Naive parallel floating-point reduction is **not**
+reproducible (FP addition isn't associative and rayon's work-stealing varies the summation order),
+so all reductions use a **fixed-block, ordered-merge** scheme (`backed::processing::det`): rows are
+cut into fixed-size blocks at fixed indices, each block is folded sequentially, and partials are
+merged in block order. The partition and merge order depend only on the data size and a constant
+block size — never on thread count or scheduling — so results are bit-identical on every run.
+
+Verified two ways:
+- **Unit tests** run QC / HVG / preprocess / PCA under rayon pools of 1 vs 8 threads and assert
+  bit-identical metrics, masks, embeddings, and variance ratios.
+- **At scale (50k cells, real data):** the full pipeline (`preprocess → hvg → pca`) run with
+  `RAYON_NUM_THREADS=1` vs `=18` produced **bit-identical** X, obs QC columns, var HVG columns,
+  `obsm["X_pca"]`, and `uns` variance ratios.
+
+(The cheap elementwise transforms — normalize/log1p — have no cross-row reduction and are
+deterministic by construction; PCA projection is per-cell independent, also order-free.)
+
 
 Same work in both lanes (QC + `normalize_total(1e4)` + `log1p`) on the same `.h5ad`, each run as
 a subprocess under `/usr/bin/time -l` to capture **peak RSS** and wall time.
