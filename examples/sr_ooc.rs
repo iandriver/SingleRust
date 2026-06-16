@@ -15,6 +15,7 @@
 use std::path::{Path, PathBuf};
 
 use single_rust::backed::processing::hvg::highly_variable_genes_backed;
+use single_rust::backed::processing::pca::pca_backed;
 use single_rust::backed::processing::pipeline::preprocess_backed;
 use single_rust::backed::processing::qc::qc_metrics_backed;
 use single_rust::backed::processing::transformation::{log1p_backed, normalize_total_backed};
@@ -27,7 +28,8 @@ fn main() -> anyhow::Result<()> {
              sr_ooc normalize_total <file.h5ad> [--target-sum F] [--log1p] [--out OUT] [--chunk N]\n  \
              sr_ooc log1p <file.h5ad> [--out OUT] [--chunk N]\n  \
              sr_ooc preprocess <file.h5ad> [--target-sum F] [--no-log1p] [--out OUT] [--chunk N]\n  \
-             sr_ooc hvg <file.h5ad> [--n-top-genes N] [--chunk N]"
+             sr_ooc hvg <file.h5ad> [--n-top-genes N] [--chunk N]\n  \
+             sr_ooc pca <file.h5ad> [--n-comps N] [--chunk N]   (needs hvg first)"
         );
         std::process::exit(2);
     }
@@ -49,6 +51,14 @@ fn main() -> anyhow::Result<()> {
                 .transpose()?;
             highly_variable_genes_backed(&input, n_top, chunk)?;
             println!("hvg -> {} (in place)", input.display());
+        }
+        "pca" => {
+            let n_comps = flag_val(flags, "--n-comps")
+                .map(|s| s.parse())
+                .transpose()?
+                .unwrap_or(50);
+            pca_backed(&input, n_comps, None, chunk)?;
+            println!("pca -> {} obsm[\"X_pca\"] (in place)", input.display());
         }
         "log1p" => {
             in_place_or_out(&input, out, |inp, outp| log1p_backed(inp, outp, chunk))?;

@@ -106,6 +106,13 @@ class _PP:
               *(["--n-top-genes", str(int(n_top_genes))] if n_top_genes else []),
               *(["--chunk", str(chunk)] if chunk else [])])
 
+    def pca(self, adata, *, n_comps=50, chunk=None, **_ignored) -> None:
+        """≈ ``sc.pp.pca(adata, n_comps=...)`` — out-of-core covariance PCA over the HVGs
+        (run highly_variable_genes first); writes obsm["X_pca"] + uns variance ratios in place."""
+        path = _resolve_path(adata)
+        _run(["pca", str(path), "--n-comps", str(int(n_comps)),
+              *(["--chunk", str(chunk)] if chunk else [])])
+
     def preprocess(self, adata, *, target_sum=1e4, log1p=True, chunk=None, **_ignored) -> None:
         """Fused QC + normalize_total + log1p in one out-of-core job (≈ sc.pp QC then
         normalize_total then log1p). Writes obs/var QC metrics + the normalized X in place."""

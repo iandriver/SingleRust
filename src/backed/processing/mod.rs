@@ -6,6 +6,7 @@
 //! - [`pipeline`]: fused QC + normalize + log1p in one job.
 //! - [`hvg`]: streaming highly variable genes (Seurat), written into `var` in place.
 pub mod hvg;
+pub mod pca;
 pub mod pipeline;
 pub mod qc;
 pub mod transformation;

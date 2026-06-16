@@ -173,11 +173,14 @@ pub fn compute_highly_variable_genes(
 /// (column mean and sample variance of `X`) it returns identical
 /// `(log1p_means, log_dispersions, dispersions_norm, highly_variable)`. Factoring it out keeps the
 /// disk-backed implementation byte-for-byte consistent with the in-memory one.
+/// `(log1p_means, log_dispersions, dispersions_norm, highly_variable)` from [`seurat_select`].
+pub(crate) type SeuratResult = (Vec<f64>, Vec<f64>, Vec<f64>, Vec<bool>);
+
 pub(crate) fn seurat_select(
     raw_means: &[f64],
     variances: &[f64],
     params: &HVGParams,
-) -> anyhow::Result<(Vec<f64>, Vec<f64>, Vec<f64>, Vec<bool>)> {
+) -> anyhow::Result<SeuratResult> {
     let dispersions: Vec<f64> = raw_means
         .iter()
         .zip(variances.iter())
