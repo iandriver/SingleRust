@@ -1,4 +1,17 @@
-# Out-of-core benchmark — memory vs scanpy
+# Out-of-core preprocessing — memory vs scanpy
+
+> **Tier-1 OOC pipeline is complete.** All of QC, `normalize_total`, `log1p`, a fused
+> `preprocess`, highly variable genes (Seurat), and PCA run disk-backed in bounded memory, exposed
+> as `sr_ooc <cmd>` and `sr.pp.*` (drop-in for `sc.pp.*`). Each step is unit-tested against its
+> in-memory / dense counterpart: log1p & normalize match scanpy's X exactly; QC matches
+> (totals/mito/top-N/var); HVG selects the **same** genes as SingleRust's in-memory HVG; PCA
+> matches a dense covariance-PCA reference (variance ratios exact, embedding norms match, up to
+> per-component sign). End-to-end vs scanpy, the PCA *spectrum* tracks scanpy but the exact axes
+> differ because SingleRust's Seurat HVG picks a different gene set than scanpy's (a pre-existing
+> in-memory difference, not introduced by the OOC path).
+
+The benchmark below covers the QC + normalize_total + log1p portion.
+
 
 Same work in both lanes (QC + `normalize_total(1e4)` + `log1p`) on the same `.h5ad`, each run as
 a subprocess under `/usr/bin/time -l` to capture **peak RSS** and wall time.
