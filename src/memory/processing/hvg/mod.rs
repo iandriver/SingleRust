@@ -167,6 +167,51 @@ pub fn compute_highly_variable_genes(
     }
 }
 
+/// Seurat-flavor dispersion processing from per-gene means and variances.
+///
+/// Shared by the in-memory and out-of-core HVG paths: given the same `raw_means`/`variances`
+/// (column mean and sample variance of `X`) it returns identical
+/// `(log1p_means, log_dispersions, dispersions_norm, highly_variable)`. Factoring it out keeps the
+/// disk-backed implementation byte-for-byte consistent with the in-memory one.
+pub(crate) fn seurat_select(
+    raw_means: &[f64],
+    variances: &[f64],
+    params: &HVGParams,
+) -> anyhow::Result<(Vec<f64>, Vec<f64>, Vec<f64>, Vec<bool>)> {
+    let dispersions: Vec<f64> = raw_means
+        .iter()
+        .zip(variances.iter())
+        .map(|(&mean, &var)| {
+            let safe_mean = if mean > 1e-12 { mean } else { 1e-12 };
+            var / safe_mean
+        })
+        .collect();
+
+    let log1p_means: Vec<f64> = raw_means.iter().map(|&x| (x + 1.0).ln()).collect();
+    let log_dispersions: Vec<f64> = dispersions
+        .iter()
+        .map(|&x| if x > 0.0 { x.ln() } else { f64::NAN })
+        .collect();
+
+    let (bin_indices, _) = equal_width_binning(&log1p_means, params.n_bins)?;
+    let (mut bin_means, mut bin_stds) =
+        calculate_bin_stats(&log_dispersions, &bin_indices, params.n_bins)?;
+    postprocess_seurat_dispersions(&mut bin_means, &mut bin_stds)?;
+    let normalized_dispersions =
+        normalize_dispersions(&log_dispersions, &bin_indices, &bin_means, &bin_stds)?;
+
+    let highly_variable = subset_genes(
+        &log1p_means,
+        &normalized_dispersions,
+        params.n_top_genes,
+        params.min_mean,
+        params.max_mean,
+        params.min_dispersion,
+    )?;
+
+    Ok((log1p_means, log_dispersions, normalized_dispersions, highly_variable))
+}
+
 /// Post-process dispersion statistics for Seurat method to handle edge cases.
 ///
 /// Handles bins with single genes where standard deviation cannot be computed.
@@ -506,57 +551,10 @@ fn compute_seurat_hvg(
 
     let variances: Vec<f64> = x.variance_whole::<u32, f64>(&Direction::COLUMN)?;
 
-    // Calculate dispersions with proper handling of zero means
-    let dispersions: Vec<f64> = raw_means
-        .iter()
-        .zip(variances.iter())
-        .map(|(&mean, &var)| {
-            let safe_mean = if mean > 1e-12 { mean } else { 1e-12 };
-            var / safe_mean
-        })
-        .collect();
-
-    // For Seurat flavor, use log1p of means for binning and storage
-    // This matches what Python does AFTER reverting log normalization
-    let log1p_means: Vec<f64> = raw_means.iter().map(|&x| (x + 1.0).ln()).collect();
-
-    // Log dispersions with NaN for zero dispersions (matching Python)
-    let log_dispersions: Vec<f64> = dispersions
-        .iter()
-        .map(|&x| {
-            if x > 0.0 {
-                x.ln()
-            } else {
-                f64::NAN // Python sets dispersion[dispersion == 0] = np.nan
-            }
-        })
-        .collect();
-
-    let n_bins = params.n_bins;
-
-    // Use equal-width binning on log1p_means (like Python's pd.cut)
-    let (bin_indices, _) = equal_width_binning(&log1p_means, n_bins)?;
-
-    // Calculate mean and std for each bin
-    let (mut bin_means, mut bin_stds) =
-        calculate_bin_stats(&log_dispersions, &bin_indices, n_bins)?;
-
-    // Handle single-gene bins (like Python's _postprocess_dispersions_seurat)
-    postprocess_seurat_dispersions(&mut bin_means, &mut bin_stds)?;
-
-    // Normalize dispersions
-    let normalized_dispersions =
-        normalize_dispersions(&log_dispersions, &bin_indices, &bin_means, &bin_stds)?;
-
-    // Select highly variable genes using raw means for filtering
-    let highly_variable = subset_genes(
-        &log1p_means, // Pass log-transformed means
-        &normalized_dispersions,
-        params.n_top_genes,
-        params.min_mean,
-        params.max_mean,
-        params.min_dispersion,
-    )?;
+    // Seurat dispersion binning/normalization + selection (shared with the out-of-core path so
+    // both produce identical results from the same per-gene means/variances).
+    let (log1p_means, log_dispersions, normalized_dispersions, highly_variable) =
+        seurat_select(&raw_means, &variances, &params)?;
 
     // Store results - IMPORTANT: Store log1p means to match Python
     let mut var_df = adata.var().get_data();

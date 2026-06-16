@@ -98,6 +98,14 @@ class _PP:
         _run(["normalize_total", str(path), "--target-sum", repr(float(target_sum)), "--log1p",
               *(["--chunk", str(chunk)] if chunk else [])])
 
+    def highly_variable_genes(self, adata, *, n_top_genes=2000, chunk=None, **_ignored) -> None:
+        """≈ ``sc.pp.highly_variable_genes(adata, flavor="seurat", n_top_genes=...)`` — writes
+        means/dispersions/dispersions_norm/highly_variable into var in place."""
+        path = _resolve_path(adata)
+        _run(["hvg", str(path),
+              *(["--n-top-genes", str(int(n_top_genes))] if n_top_genes else []),
+              *(["--chunk", str(chunk)] if chunk else [])])
+
     def preprocess(self, adata, *, target_sum=1e4, log1p=True, chunk=None, **_ignored) -> None:
         """Fused QC + normalize_total + log1p in one out-of-core job (≈ sc.pp QC then
         normalize_total then log1p). Writes obs/var QC metrics + the normalized X in place."""

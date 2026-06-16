@@ -13,7 +13,7 @@
 pub mod diffexp;
 pub mod dimred;
 pub mod filtering;
-mod hvg;
+pub(crate) mod hvg;
 mod transformation;
 
 pub mod enrichment;

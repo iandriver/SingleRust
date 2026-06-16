@@ -14,6 +14,7 @@
 
 use std::path::{Path, PathBuf};
 
+use single_rust::backed::processing::hvg::highly_variable_genes_backed;
 use single_rust::backed::processing::pipeline::preprocess_backed;
 use single_rust::backed::processing::qc::qc_metrics_backed;
 use single_rust::backed::processing::transformation::{log1p_backed, normalize_total_backed};
@@ -25,7 +26,8 @@ fn main() -> anyhow::Result<()> {
             "usage:\n  sr_ooc qc <file.h5ad> [--chunk N]\n  \
              sr_ooc normalize_total <file.h5ad> [--target-sum F] [--log1p] [--out OUT] [--chunk N]\n  \
              sr_ooc log1p <file.h5ad> [--out OUT] [--chunk N]\n  \
-             sr_ooc preprocess <file.h5ad> [--target-sum F] [--no-log1p] [--out OUT] [--chunk N]"
+             sr_ooc preprocess <file.h5ad> [--target-sum F] [--no-log1p] [--out OUT] [--chunk N]\n  \
+             sr_ooc hvg <file.h5ad> [--n-top-genes N] [--chunk N]"
         );
         std::process::exit(2);
     }
@@ -40,6 +42,13 @@ fn main() -> anyhow::Result<()> {
         "qc" => {
             qc_metrics_backed(&input, chunk)?;
             println!("qc -> {} (in place)", input.display());
+        }
+        "hvg" => {
+            let n_top = flag_val(flags, "--n-top-genes")
+                .map(|s| s.parse())
+                .transpose()?;
+            highly_variable_genes_backed(&input, n_top, chunk)?;
+            println!("hvg -> {} (in place)", input.display());
         }
         "log1p" => {
             in_place_or_out(&input, out, |inp, outp| log1p_backed(inp, outp, chunk))?;
