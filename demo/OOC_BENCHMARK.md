@@ -28,15 +28,20 @@ python demo/bench_pseudobulk.py data/psb_input.h5ad donor cell_type 10000
 
 | lane | time | peak RSS |
 |---|---:|---:|
-| decoupler (in-memory) | 33.0 s (compute) | 18.0 GB |
-| **SingleRust OOC** | 8.1 s (wall, incl. I/O) | **3.2 GB** |
+| decoupler (in-memory) | 29.9 s (compute) | 21.6 GB |
+| **SingleRust OOC** | 5.1 s (wall, incl. I/O) | **4.6 GB** |
 
-**~4.1× faster, ~5.6× less memory, and bit-identical** (aggregate-sum max abs diff = 0 over all
+**~5.9× faster, ~4.7× less memory, and bit-identical** (aggregate-sum max abs diff = 0 over all
 1,716 groups). The time gap is *conservative*: decoupler's number excludes its data load while
-SingleRust's includes reading the file. Aggregation is a sequential scatter-add (each cell touches
-one output row), so it is deterministic by construction. `mode="sum"` (default) and `"mean"` are
-supported; `obs` carries `psbulk_cells`/`psbulk_counts` and `layers["psbulk_props"]` holds the
-non-zero fraction — matching decoupler's outputs.
+SingleRust's includes reading the file. `mode="sum"` (default) and `"mean"` are supported; `obs`
+carries `psbulk_cells`/`psbulk_counts` and `layers["psbulk_props"]` holds the non-zero fraction —
+matching decoupler's outputs.
+
+**Deterministic parallel scatter.** The scatter-add is parallelized by partitioning groups across
+a fixed 16 buckets (`group % 16`); each bucket is owned by one thread, so every group is summed by
+one thread in cell order — no cross-thread merge of any group, hence bit-identical regardless of
+thread count (the partition buffers add ~1.4 GB vs the sequential version). Verified at scale:
+`RAYON_NUM_THREADS=1` vs `18` on 500k gave bit-identical X, counts, and props.
 
 ## Deterministic parallelism
 

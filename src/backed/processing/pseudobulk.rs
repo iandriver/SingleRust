@@ -28,8 +28,26 @@ use anyhow::{bail, Context};
 use ndarray::Array2;
 use num_traits::ToPrimitive;
 use polars::prelude::{Column, DataType};
+use rayon::prelude::*;
 
 use super::transformation::DEFAULT_CHUNK_SIZE;
+
+/// Fixed number of group-partitions for the parallel scatter-add. Each partition owns a disjoint
+/// set of output rows (`group % DET_PARTITIONS`), so threads accumulate into non-overlapping
+/// memory and each group is summed by exactly one thread in cell order — bit-deterministic
+/// regardless of how many rayon threads actually run. Constant (not thread count) for
+/// cross-machine reproducibility.
+const DET_PARTITIONS: usize = 16;
+
+/// One partition's accumulators: the output rows `r` with `r % DET_PARTITIONS == p`, stored
+/// compactly (local row `lr` ↔ global row `lr * DET_PARTITIONS + p`).
+struct Partition {
+    psbulk: Vec<f64>, // local_rows × n_genes
+    nnz: Vec<f64>,    // local_rows × n_genes
+    ncells: Vec<f64>, // local_rows
+    counts: Vec<f64>, // local_rows
+    n_local: usize,
+}
 
 /// Aggregation mode. `Sum` (decoupler default, raw counts) and `Mean` (sum / n_cells).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -95,15 +113,44 @@ pub fn pseudobulk_backed(
         cell_row[i] = gi * n_smp + si; // group-major (decoupler order)
     }
 
-    // Accumulators (output is small: n_rows × n_genes).
+    // ---- single streaming pass: deterministic parallel scatter-add ----
+    // Group accumulators are partitioned across DET_PARTITIONS buckets (by group % P); each bucket
+    // is owned by one thread, so cells of a given group are always summed by the same thread in
+    // cell order. No per-thread duplicate of the full accumulator, no cross-thread merge of any
+    // group — bit-identical regardless of thread count.
+    let p = DET_PARTITIONS;
+    let mut partitions: Vec<Partition> = (0..p)
+        .map(|pi| {
+            let n_local = if pi < n_rows { (n_rows - pi).div_ceil(p) } else { 0 };
+            Partition {
+                psbulk: vec![0.0_f64; n_local * n_genes],
+                nnz: vec![0.0_f64; n_local * n_genes],
+                ncells: vec![0.0_f64; n_local],
+                counts: vec![0.0_f64; n_local],
+                n_local,
+            }
+        })
+        .collect();
+
+    for (chunk, start, _end) in adata.x().iter::<ArrayData>(chunk_size) {
+        scatter_add_parallel(&chunk, start, &cell_row, n_genes, p, &mut partitions)?;
+    }
+
+    // Assemble the partitions into row-major output arrays (global row = lr * P + pi).
     let mut psbulk = vec![0.0_f64; n_rows * n_genes];
-    let mut nnz = vec![0.0_f64; n_rows * n_genes]; // non-zero counts -> props
+    let mut nnz = vec![0.0_f64; n_rows * n_genes];
     let mut ncells = vec![0.0_f64; n_rows];
     let mut counts = vec![0.0_f64; n_rows];
-
-    // ---- single streaming pass: scatter-add each cell into its group row ----
-    for (chunk, start, _end) in adata.x().iter::<ArrayData>(chunk_size) {
-        scatter_add(&chunk, start, &cell_row, n_genes, &mut psbulk, &mut nnz, &mut ncells, &mut counts)?;
+    for (pi, part) in partitions.into_iter().enumerate() {
+        for lr in 0..part.n_local {
+            let r = lr * p + pi;
+            ncells[r] = part.ncells[lr];
+            counts[r] = part.counts[lr];
+            psbulk[r * n_genes..(r + 1) * n_genes]
+                .copy_from_slice(&part.psbulk[lr * n_genes..(lr + 1) * n_genes]);
+            nnz[r * n_genes..(r + 1) * n_genes]
+                .copy_from_slice(&part.nnz[lr * n_genes..(lr + 1) * n_genes]);
+        }
     }
 
     // Finalize: mean if requested, props = nnz / n_cells.
@@ -145,41 +192,59 @@ fn sorted_unique(vals: &[Option<String>]) -> Vec<String> {
     set
 }
 
-#[allow(clippy::too_many_arguments)]
-fn scatter_add(
+/// Scatter-add a chunk into the group partitions in parallel. Each partition thread scans the
+/// whole chunk but only touches cells whose group falls in its bucket (`group % P == pi`), so the
+/// `&mut Partition`s are disjoint and every group is summed by one thread in fixed cell order.
+fn scatter_add_parallel(
     chunk: &ArrayData,
     start: usize,
     cell_row: &[usize],
     n_genes: usize,
-    psbulk: &mut [f64],
-    nnz: &mut [f64],
-    ncells: &mut [f64],
-    counts: &mut [f64],
+    p: usize,
+    partitions: &mut [Partition],
 ) -> anyhow::Result<()> {
-    macro_rules! go {
-        ($m:expr) => {{
-            for (i, row) in $m.row_iter().enumerate() {
-                let r = cell_row[start + i];
-                if r == usize::MAX {
-                    continue;
-                }
-                ncells[r] += 1.0;
-                let base = r * n_genes;
-                for (&c, &v) in row.col_indices().iter().zip(row.values().iter()) {
-                    let v = v.to_f64().unwrap_or(0.0);
-                    psbulk[base + c] += v;
-                    nnz[base + c] += 1.0;
-                    counts[r] += v;
-                }
-            }
-        }};
-    }
     match chunk {
-        ArrayData::CsrMatrix(DynCsrMatrix::F32(m)) => go!(m),
-        ArrayData::CsrMatrix(DynCsrMatrix::F64(m)) => go!(m),
+        ArrayData::CsrMatrix(DynCsrMatrix::F32(m)) => {
+            scatter_csr(m, start, cell_row, n_genes, p, partitions);
+            Ok(())
+        }
+        ArrayData::CsrMatrix(DynCsrMatrix::F64(m)) => {
+            scatter_csr(m, start, cell_row, n_genes, p, partitions);
+            Ok(())
+        }
         other => bail!("OOC pseudobulk supports only F32/F64 CSR matrices, got {:?}", other),
     }
-    Ok(())
+}
+
+fn scatter_csr<T: Copy + ToPrimitive + Sync>(
+    m: &nalgebra_sparse::CsrMatrix<T>,
+    start: usize,
+    cell_row: &[usize],
+    n_genes: usize,
+    p: usize,
+    partitions: &mut [Partition],
+) {
+    partitions
+        .par_iter_mut()
+        .enumerate()
+        .for_each(|(pi, part)| {
+            for i in 0..m.nrows() {
+                let r = cell_row[start + i];
+                if r == usize::MAX || r % p != pi {
+                    continue;
+                }
+                let lr = r / p; // local row in this partition
+                let base = lr * n_genes;
+                let row = m.row(i);
+                part.ncells[lr] += 1.0;
+                for (&c, &v) in row.col_indices().iter().zip(row.values().iter()) {
+                    let v = v.to_f64().unwrap_or(0.0);
+                    part.psbulk[base + c] += v;
+                    part.nnz[base + c] += 1.0;
+                    part.counts[lr] += v;
+                }
+            }
+        });
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -325,6 +390,70 @@ mod tests {
         for p in [inp, out] {
             std::fs::remove_file(p).ok();
         }
+        Ok(())
+    }
+
+    /// Determinism: parallel scatter-add under 1 vs 8 threads must yield bit-identical aggregate,
+    /// cells, counts, and props.
+    #[test]
+    fn pseudobulk_is_deterministic_across_thread_counts() -> anyhow::Result<()> {
+        let (nr, nc) = (6000usize, 40usize);
+        let n_donors = 7;
+        let n_types = 5;
+        let build = |tag: &str| -> anyhow::Result<std::path::PathBuf> {
+            let mut coo = CooMatrix::<f32>::new(nr, nc);
+            for i in 0..nr {
+                for j in 0..nc {
+                    let v = (((i * 7 + j * 3) % 6) as f32) * 0.5;
+                    if v != 0.0 {
+                        coo.push(i, j, v);
+                    }
+                }
+            }
+            let p = tmp(&format!("sr_psb_det_{tag}.h5ad"));
+            let a = AnnData::<H5>::new(&p)?;
+            a.set_obs_names((0..nr).map(|i| format!("c{i}")).collect::<Vec<_>>().into())?;
+            a.set_var_names((0..nc).map(|j| format!("g{j}")).collect::<Vec<_>>().into())?;
+            a.set_x(ArrayData::CsrMatrix(DynCsrMatrix::F32(CsrMatrix::from(&coo))))?;
+            let mut obs = polars::frame::DataFrame::default();
+            obs.with_column(Column::new(
+                "donor".into(),
+                (0..nr).map(|i| format!("d{}", i % n_donors)).collect::<Vec<_>>(),
+            ))?;
+            obs.with_column(Column::new(
+                "celltype".into(),
+                (0..nr).map(|i| format!("t{}", i % n_types)).collect::<Vec<_>>(),
+            ))?;
+            a.set_obs(obs)?;
+            a.close()?;
+            Ok(p)
+        };
+        let run = |threads: usize, tag: &str| -> anyhow::Result<(Vec<f64>, Vec<f64>, Vec<f64>)> {
+            let inp = build(tag)?;
+            let out = tmp(&format!("sr_psb_det_out_{tag}.h5ad"));
+            let pool = rayon::ThreadPoolBuilder::new().num_threads(threads).build()?;
+            pool.install(|| {
+                pseudobulk_backed(&inp, &out, "donor", Some("celltype"), PseudobulkMode::Sum, Some(500))
+            })?;
+            let a = AnnData::<H5>::open(H5::open(&out)?)?;
+            let x = match a.x().get::<ArrayData>()?.unwrap() {
+                ArrayData::Array(DynArray::F64(arr)) => arr.into_raw_vec_and_offset().0,
+                other => panic!("unexpected X {:?}", other),
+            };
+            let obs = a.read_obs()?;
+            let cells = obs.column("psbulk_cells")?.f64()?.into_iter().map(|x| x.unwrap_or(f64::NAN)).collect();
+            let counts = obs.column("psbulk_counts")?.f64()?.into_iter().map(|x| x.unwrap_or(f64::NAN)).collect();
+            a.close()?;
+            for f in [inp, out] {
+                std::fs::remove_file(f).ok();
+            }
+            Ok((x, cells, counts))
+        };
+        let (x1, c1, n1) = run(1, "t1")?;
+        let (x8, c8, n8) = run(8, "t8")?;
+        assert_eq!(x1, x8, "aggregate differs across thread counts");
+        assert_eq!(c1, c8, "psbulk_cells differ across thread counts");
+        assert_eq!(n1, n8, "psbulk_counts differ across thread counts");
         Ok(())
     }
 }
