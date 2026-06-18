@@ -106,6 +106,21 @@ class _PP:
               *(["--n-top-genes", str(int(n_top_genes))] if n_top_genes else []),
               *(["--chunk", str(chunk)] if chunk else [])])
 
+    def pseudobulk(self, adata, sample_col, groups_col=None, *, mode="sum", out=None, chunk=None, **_ignored):
+        """≈ ``dc.pp.pseudobulk(adata, sample_col, groups_col, mode=...)`` — out-of-core
+        sample×group aggregation in a single streaming pass. Writes a new groups×genes .h5ad
+        (default ``<input>.pseudobulk.h5ad``) and returns its path."""
+        import pathlib as _p
+        path = _resolve_path(adata)
+        outp = _p.Path(out) if out else path.with_suffix(".pseudobulk.h5ad")
+        args = ["pseudobulk", str(path), "--out", str(outp), "--sample-col", str(sample_col), "--mode", mode]
+        if groups_col:
+            args += ["--group-col", str(groups_col)]
+        if chunk:
+            args += ["--chunk", str(chunk)]
+        _run(args)
+        return outp
+
     def pca(self, adata, *, n_comps=50, chunk=None, **_ignored) -> None:
         """≈ ``sc.pp.pca(adata, n_comps=...)`` — out-of-core covariance PCA over the HVGs
         (run highly_variable_genes first); writes obsm["X_pca"] + uns variance ratios in place."""

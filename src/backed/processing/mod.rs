@@ -12,5 +12,6 @@ pub(crate) mod det;
 pub mod hvg;
 pub mod pca;
 pub mod pipeline;
+pub mod pseudobulk;
 pub mod qc;
 pub mod transformation;

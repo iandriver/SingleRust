@@ -12,6 +12,32 @@
 
 The benchmark below covers the QC + normalize_total + log1p portion.
 
+## Pseudobulk vs decoupler
+
+`dc.pp.pseudobulk` aggregates single-cell counts per `sample × group`. decoupler loops the full
+sample×group cartesian product and, for each, boolean-masks **all** cells and **densifies** the
+submatrix (`X[mask].toarray()`) — `O(n_obs · n_groups)` masking plus per-group densification, with
+the whole input resident. SingleRust does it in a **single streaming sparse scatter-add** (each
+cell → its group accumulator): `O(nnz)`, one pass, only the small `groups × genes` output resident.
+
+```bash
+python demo/bench_pseudobulk.py data/psb_input.h5ad donor cell_type 10000
+```
+
+500k cells × 48,788 genes, **12 donors × 143 cell types = 1,716 groups** (48 GB / 18-core):
+
+| lane | time | peak RSS |
+|---|---:|---:|
+| decoupler (in-memory) | 33.0 s (compute) | 18.0 GB |
+| **SingleRust OOC** | 8.1 s (wall, incl. I/O) | **3.2 GB** |
+
+**~4.1× faster, ~5.6× less memory, and bit-identical** (aggregate-sum max abs diff = 0 over all
+1,716 groups). The time gap is *conservative*: decoupler's number excludes its data load while
+SingleRust's includes reading the file. Aggregation is a sequential scatter-add (each cell touches
+one output row), so it is deterministic by construction. `mode="sum"` (default) and `"mean"` are
+supported; `obs` carries `psbulk_cells`/`psbulk_counts` and `layers["psbulk_props"]` holds the
+non-zero fraction — matching decoupler's outputs.
+
 ## Deterministic parallelism
 
 The compute-bound passes — QC accumulation, HVG sum/sum-of-squares, and PCA's gene×gene Gram
