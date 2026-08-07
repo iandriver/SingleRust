@@ -24,18 +24,52 @@ cell → its group accumulator): `O(nnz)`, one pass, only the small `groups × g
 python demo/bench_pseudobulk.py data/psb_input.h5ad donor cell_type 10000
 ```
 
-500k cells × 48,788 genes, **12 donors × 143 cell types = 1,716 groups** (48 GB / 18-core):
+48,788 genes, **12 donors × 143 cell types = 1,716 groups** throughout (48 GB / 18-core, chunk
+10,000). The 1M/2M inputs are the 500k dataset tiled 2×/4× along obs (`demo/_replicate_cells.py`),
+so the group cardinality — and thus the work decoupler does — is held constant and only the cell
+count grows.
 
-| lane | time | peak RSS |
-|---|---:|---:|
-| decoupler (in-memory) | 29.9 s (compute) | 21.6 GB |
-| **SingleRust OOC** | 5.1 s (wall, incl. I/O) | **4.6 GB** |
+| cells | decoupler time | decoupler peak RSS | SingleRust time | SingleRust peak RSS |
+|---:|---:|---:|---:|---:|
+| 500k | 29.9 s | 21.6 GB | 12.2 s | 3.4 GB |
+| 1M | 167.8 s ⚠ | 19.2 GB ⚠ | 19.3 s | 2.4 GB |
+| 2M | not run (see below) | — | 26.1 s | 3.6 GB |
 
-**~5.9× faster, ~4.7× less memory, and bit-identical** (aggregate-sum max abs diff = 0 over all
-1,716 groups). The time gap is *conservative*: decoupler's number excludes its data load while
-SingleRust's includes reading the file. `mode="sum"` (default) and `"mean"` are supported; `obs`
-carries `psbulk_cells`/`psbulk_counts` and `layers["psbulk_props"]` holds the non-zero fraction —
-matching decoupler's outputs.
+**SingleRust's memory is flat (~2.4–3.6 GB) and its time is sub-linear** — 4× the cells costs 2.1×
+the time. Both follow from the design: peak RSS is dominated by the fixed `groups × genes`
+accumulator plus one chunk (neither depends on cell count), and the fixed output allocate/write cost
+amortizes as cells grow. decoupler's cost is driven by `O(n_obs · n_groups)` masking plus per-group
+densification with the whole input resident, so it grows with cells even at constant group count.
+
+**Exactness at every size.** SingleRust vs decoupler at 1M: aggregate-sum max abs diff = **0** over
+all 1,716 groups. Tiling also gives a free self-check — the 1M and 2M sums must equal exactly 2× and
+4× the 500k sums, and they do (max abs diff = 0, `psbulk_cells` likewise).
+
+`mode="sum"` (default) and `"mean"` are supported; `obs` carries `psbulk_cells`/`psbulk_counts` and
+`layers["psbulk_props"]` holds the non-zero fraction — matching decoupler's outputs.
+
+### Caveats — read before quoting these numbers
+
+- **⚠ The 1M decoupler run is contaminated.** An unrelated 8–16 GB process was running on the same
+  machine for part of it, and decoupler was paging: 185 s wall against only 122 s CPU
+  (71 user + 51 sys). Its true quiet-machine time is lower than 167.8 s. Treat the 1M row as
+  "decoupler degrades sharply once it no longer fits" — not as a precise 8.7× ratio.
+- **⚠ Peak RSS understates decoupler's demand at 1M.** Resident set fell from 13.5 GB to ~5 GB
+  mid-run as the OS evicted pages to swap, so 19.2 GB is a *ceiling on residency*, not on demand —
+  which is why it reads lower than the 500k row despite twice the data. Once a lane swaps, RSS stops
+  being a fair memory metric.
+- **The 500k row is a fresh cold-cache re-measurement.** An earlier version of this file reported
+  5.1 s / 4.6 GB for SingleRust at 500k. That run followed decoupler over the same file, so it read
+  from a warm page cache. Cold, it is 12.2 s. The corrected gap at 500k is ~2.4×, not ~5.9×.
+- **Time is still not apples-to-apples, in decoupler's favor on I/O:** decoupler's number is
+  compute-only (`dc.pp.pseudobulk` alone, excluding its data load), while SingleRust's is wall time
+  including reading the file and writing the result.
+- **2M decoupler was not run.** It needs ~24 GB for the CSR matrix alone before any aggregation; at
+  the time of the run a neighbor process held 16.2 GB and swap was 98% used, so attempting it risked
+  destabilizing the machine rather than producing a usable number.
+- **nnz overflows int32 past ~1.4M cells at this density.** The 2M file (nnz = 3.01e9) requires an
+  int64 CSR `indptr`; SingleRust reads it without issue, but it is a real cliff for any 32-bit
+  index path.
 
 **Deterministic parallel scatter.** The scatter-add is parallelized by partitioning groups across
 a fixed 16 buckets (`group % 16`); each bucket is owned by one thread, so every group is summed by
