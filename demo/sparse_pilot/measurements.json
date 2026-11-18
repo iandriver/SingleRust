@@ -1,0 +1,422 @@
+[
+  {
+    "mode": "decoupler",
+    "groups": 1000,
+    "threads": 4,
+    "seconds": 8.163,
+    "peak_MB": 527.5,
+    "status": "complete",
+    "genes": 256,
+    "cells": 500000
+  },
+  {
+    "mode": "rust",
+    "groups": 1000,
+    "threads": 1,
+    "seconds": 1.07,
+    "peak_MB": 282.4,
+    "status": "complete",
+    "genes": 256,
+    "cells": 500000
+  },
+  {
+    "mode": "rust",
+    "groups": 1000,
+    "threads": 4,
+    "seconds": 0.945,
+    "peak_MB": 284.9,
+    "status": "complete",
+    "genes": 256,
+    "cells": 500000
+  },
+  {
+    "mode": "rust",
+    "groups": 1000,
+    "threads": 4,
+    "seconds": 0.964,
+    "peak_MB": 300.8,
+    "status": "complete",
+    "genes": 256,
+    "cells": 500000
+  },
+  {
+    "mode": "scanpy",
+    "groups": 1000,
+    "threads": 4,
+    "seconds": 2.414,
+    "peak_MB": 585.3,
+    "status": "complete",
+    "genes": 256,
+    "cells": 500000
+  },
+  {
+    "mode": "scanpy-pr",
+    "groups": 1000,
+    "threads": 4,
+    "seconds": 2.403,
+    "peak_MB": 531.7,
+    "status": "complete",
+    "genes": 256,
+    "cells": 500000
+  },
+  {
+    "mode": "decoupler",
+    "groups": 10000,
+    "threads": 4,
+    "seconds": 36.682,
+    "peak_MB": 599.9,
+    "status": "complete",
+    "genes": 256,
+    "cells": 500000
+  },
+  {
+    "mode": "rust",
+    "groups": 10000,
+    "threads": 1,
+    "seconds": 1.112,
+    "peak_MB": 441.0,
+    "status": "complete",
+    "genes": 256,
+    "cells": 500000
+  },
+  {
+    "mode": "rust",
+    "groups": 10000,
+    "threads": 4,
+    "seconds": 1.075,
+    "peak_MB": 444.9,
+    "status": "complete",
+    "genes": 256,
+    "cells": 500000
+  },
+  {
+    "mode": "rust",
+    "groups": 10000,
+    "threads": 4,
+    "seconds": 1.083,
+    "peak_MB": 416.3,
+    "status": "complete",
+    "genes": 256,
+    "cells": 500000
+  },
+  {
+    "mode": "scanpy",
+    "groups": 10000,
+    "threads": 4,
+    "seconds": 2.896,
+    "peak_MB": 1207.0,
+    "status": "complete",
+    "genes": 256,
+    "cells": 500000
+  },
+  {
+    "mode": "scanpy-pr",
+    "groups": 10000,
+    "threads": 4,
+    "seconds": 3.129,
+    "peak_MB": 828.1,
+    "status": "complete",
+    "genes": 256,
+    "cells": 500000
+  },
+  {
+    "mode": "decoupler",
+    "groups": 100000,
+    "threads": 4,
+    "seconds": 600.038,
+    "peak_MB": 828.1,
+    "status": "time limit",
+    "genes": 256,
+    "cells": 500000
+  },
+  {
+    "mode": "rust",
+    "groups": 100000,
+    "threads": 1,
+    "seconds": 1.852,
+    "peak_MB": 536.9,
+    "status": "complete",
+    "genes": 256,
+    "cells": 500000
+  },
+  {
+    "mode": "rust",
+    "groups": 100000,
+    "threads": 4,
+    "seconds": 1.748,
+    "peak_MB": 698.2,
+    "status": "complete",
+    "genes": 256,
+    "cells": 500000
+  },
+  {
+    "mode": "rust",
+    "groups": 100000,
+    "threads": 4,
+    "seconds": 1.854,
+    "peak_MB": 667.5,
+    "status": "complete",
+    "genes": 256,
+    "cells": 500000
+  },
+  {
+    "mode": "scanpy",
+    "groups": 100000,
+    "threads": 1,
+    "seconds": 18.022,
+    "peak_MB": 3980.7,
+    "status": "complete",
+    "genes": 256,
+    "cells": 500000
+  },
+  {
+    "mode": "scanpy",
+    "groups": 100000,
+    "threads": 4,
+    "seconds": 3.037,
+    "peak_MB": 6267.6,
+    "status": "memory limit",
+    "genes": 256,
+    "cells": 500000
+  },
+  {
+    "mode": "scanpy-pr",
+    "groups": 100000,
+    "threads": 4,
+    "seconds": 10.91,
+    "peak_MB": 1904.1,
+    "status": "complete",
+    "genes": 256,
+    "cells": 500000
+  },
+  {
+    "mode": "decoupler",
+    "groups": 1000,
+    "threads": 4,
+    "seconds": 152.199,
+    "peak_MB": 2482.6,
+    "status": "complete",
+    "genes": 28101,
+    "cells": 500000
+  },
+  {
+    "mode": "rust",
+    "groups": 1000,
+    "threads": 1,
+    "seconds": 45.951,
+    "peak_MB": 4327.0,
+    "status": "complete",
+    "genes": 28101,
+    "cells": 500000
+  },
+  {
+    "mode": "rust",
+    "groups": 1000,
+    "threads": 4,
+    "seconds": 43.3,
+    "peak_MB": 4576.6,
+    "status": "complete",
+    "genes": 28101,
+    "cells": 500000
+  },
+  {
+    "mode": "rust",
+    "groups": 1000,
+    "threads": 4,
+    "seconds": 40.582,
+    "peak_MB": 4672.3,
+    "status": "complete",
+    "genes": 28101,
+    "cells": 500000
+  },
+  {
+    "mode": "scanpy",
+    "groups": 1000,
+    "threads": 1,
+    "seconds": 57.679,
+    "peak_MB": 5275.0,
+    "status": "complete",
+    "genes": 28101,
+    "cells": 500000
+  },
+  {
+    "mode": "scanpy",
+    "groups": 1000,
+    "threads": 4,
+    "seconds": 12.966,
+    "peak_MB": 6042.0,
+    "status": "memory limit",
+    "genes": 28101,
+    "cells": 500000
+  },
+  {
+    "mode": "scanpy-pr",
+    "groups": 1000,
+    "threads": 1,
+    "seconds": 55.585,
+    "peak_MB": 6001.1,
+    "status": "memory limit",
+    "genes": 28101,
+    "cells": 500000
+  },
+  {
+    "mode": "scanpy-pr",
+    "groups": 1000,
+    "threads": 4,
+    "seconds": 8.289,
+    "peak_MB": 6044.4,
+    "status": "memory limit",
+    "genes": 28101,
+    "cells": 500000
+  },
+  {
+    "mode": "decoupler",
+    "groups": 10000,
+    "threads": 4,
+    "seconds": 85.405,
+    "peak_MB": 6000.5,
+    "status": "memory limit",
+    "genes": 28101,
+    "cells": 500000
+  },
+  {
+    "mode": "rust",
+    "groups": 10000,
+    "threads": 1,
+    "seconds": 50.86,
+    "peak_MB": 3795.8,
+    "status": "complete",
+    "genes": 28101,
+    "cells": 500000
+  },
+  {
+    "mode": "rust",
+    "groups": 10000,
+    "threads": 4,
+    "seconds": 47.174,
+    "peak_MB": 4425.2,
+    "status": "complete",
+    "genes": 28101,
+    "cells": 500000
+  },
+  {
+    "mode": "rust",
+    "groups": 10000,
+    "threads": 4,
+    "seconds": 45.006,
+    "peak_MB": 4647.9,
+    "status": "complete",
+    "genes": 28101,
+    "cells": 500000
+  },
+  {
+    "mode": "scanpy",
+    "groups": 10000,
+    "threads": 1,
+    "seconds": 3.702,
+    "peak_MB": 6485.4,
+    "status": "memory limit",
+    "genes": 28101,
+    "cells": 500000
+  },
+  {
+    "mode": "scanpy",
+    "groups": 10000,
+    "threads": 4,
+    "seconds": 5.033,
+    "peak_MB": 6353.5,
+    "status": "memory limit",
+    "genes": 28101,
+    "cells": 500000
+  },
+  {
+    "mode": "scanpy-pr",
+    "groups": 10000,
+    "threads": 1,
+    "seconds": 17.648,
+    "peak_MB": 6258.7,
+    "status": "memory limit",
+    "genes": 28101,
+    "cells": 500000
+  },
+  {
+    "mode": "scanpy-pr",
+    "groups": 10000,
+    "threads": 4,
+    "seconds": 3.152,
+    "peak_MB": 6573.4,
+    "status": "memory limit",
+    "genes": 28101,
+    "cells": 500000
+  },
+  {
+    "genes": 28101,
+    "cells": 500000,
+    "groups": 100000,
+    "mode": "decoupler",
+    "threads": 4,
+    "status": "dense output preflight",
+    "seconds": null,
+    "peak_MB": null
+  },
+  {
+    "mode": "rust",
+    "groups": 100000,
+    "threads": 1,
+    "seconds": 75.078,
+    "peak_MB": 4181.4,
+    "status": "complete",
+    "genes": 28101,
+    "cells": 500000
+  },
+  {
+    "mode": "rust",
+    "groups": 100000,
+    "threads": 4,
+    "seconds": 69.197,
+    "peak_MB": 4075.2,
+    "status": "complete",
+    "genes": 28101,
+    "cells": 500000
+  },
+  {
+    "mode": "rust",
+    "groups": 100000,
+    "threads": 4,
+    "seconds": 70.154,
+    "peak_MB": 4476.0,
+    "status": "complete",
+    "genes": 28101,
+    "cells": 500000
+  },
+  {
+    "genes": 28101,
+    "cells": 500000,
+    "groups": 100000,
+    "mode": "scanpy",
+    "threads": 4,
+    "status": "dense output preflight",
+    "seconds": null,
+    "peak_MB": null
+  },
+  {
+    "mode": "scanpy-pr",
+    "groups": 100000,
+    "threads": 1,
+    "seconds": 3.791,
+    "peak_MB": 7005.8,
+    "status": "memory limit",
+    "genes": 28101,
+    "cells": 500000
+  },
+  {
+    "mode": "scanpy-pr",
+    "groups": 100000,
+    "threads": 4,
+    "seconds": 2.942,
+    "peak_MB": 6477.9,
+    "status": "memory limit",
+    "genes": 28101,
+    "cells": 500000
+  }
+]
